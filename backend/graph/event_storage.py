@@ -87,8 +87,8 @@ class _EventStorage:
     
     def cleanup_run(self, run_id: str) -> None:
         with self._get_connection() as conn:
-            conn.execute("DELETE FROM events WHERE run_id = ?", (run_id,))
-            conn.execute("DELETE FROM runs WHERE id = ?", (run_id))
+            conn.execute("DELETE FROM events WHERE run_id = ?", [run_id])
+            conn.execute("DELETE FROM runs WHERE id = ?", [run_id])
     
     def get_active_run_id(self) -> Optional[str]:
         with self._get_connection() as conn:
@@ -127,27 +127,89 @@ class FlowRecorder:
         self._storage = _EventStorage(db_path, persist)
         self._current_run_id: Optional[str] = None
     
-    async def astream(self, inputs: dict, config: dict, **kwargs) -> AsyncGenerator:
+    async def astream(self, inputs: dict, config: dict, thread_id: Optional[str] = None, **kwargs) -> AsyncGenerator:
         """Stream graph execution while recording events.
         
         This method transparently passes through all chunks from the original graph
-        while storing events internally for later retrieval.
+        while storing events internally for later retrieval via /stream endpoint.
+        
+        Args:
+            thread_id: Optional thread_id to use as run_id
         """
-        run_id = str(uuid.uuid4())
+        run_id = thread_id or str(uuid.uuid4())
         self._current_run_id = run_id
         self._storage.create_run(run_id)
         self._storage.store_event(run_id, "graph_started", {})
         
         try:
-            # Stream using the original graph's astream
-            async for chunk in self._graph.astream(inputs, config, **kwargs):
-                # Store events from updates mode
-                if isinstance(chunk, dict) and chunk.get("type") == "updates":
-                    for node_id, state_update in chunk["data"].items():
+            # Use astream_events internally to capture node start events for storage
+            async for event in self._graph.astream_events(inputs, config, **kwargs):
+                event_type = event.get("event", "")
+                metadata = event.get("metadata", {})
+                
+                # Capture node start events for storage only
+                if "on_chain_start" in event_type:
+                    node_id = metadata.get("langgraph_node") or metadata.get("node_id") or metadata.get("name")
+                    if node_id and node_id != "__start__" and node_id != "__end__":
+                        self._storage.store_event(run_id, "node_started", {"node_id": node_id})
+                
+                # Capture node end events for storage only
+                elif "on_chain_end" in event_type:
+                    node_id = metadata.get("langgraph_node") or metadata.get("node_id") or metadata.get("name")
+                    if node_id and node_id != "__start__" and node_id != "__end__":
                         self._storage.store_event(run_id, "node_completed", {"node_id": node_id})
                 
-                # Pass through the original chunk transparently
-                yield chunk
+                # Pass through custom chunks from output_formatter
+                if event.get("event") == "on_chain_end" and "output_formatter" in str(metadata):
+                    output = event.get("data", {}).get("output", {})
+                    if output and isinstance(output, dict) and "content" in output:
+                        yield {"type": "custom", "data": output}
+            
+            # Mark run as completed
+            self._storage.complete_run(run_id)
+            self._storage.store_event(run_id, "graph_completed", {})
+            
+            # Auto-cleanup if not persisting
+            if not self._storage.persist:
+                self._storage.cleanup_run(run_id)
+                self._current_run_id = None
+        except Exception as e:
+            self._storage.store_event(run_id, "error", {"error": str(e)})
+            raise
+    
+    async def astream_events(self, inputs: dict, config: dict, thread_id: Optional[str] = None, **kwargs) -> AsyncGenerator:
+        """Stream graph execution events while recording node start/completion.
+        
+        This method uses LangGraph's astream_events to capture node start events
+        for dynamic visualization.
+        
+        Args:
+            thread_id: Optional thread_id to use as run_id. If not provided, generates a UUID.
+        """
+        run_id = thread_id or str(uuid.uuid4())
+        self._current_run_id = run_id
+        self._storage.create_run(run_id)
+        self._storage.store_event(run_id, "graph_started", {})
+        
+        try:
+            # Use astream_events to capture node start events
+            async for event in self._graph.astream_events(inputs, config, **kwargs):
+                event_type = event.get("event", "")
+                metadata = event.get("metadata", {})
+                
+                # Capture node start events - try multiple metadata keys
+                if "on_chain_start" in event_type:
+                    node_id = metadata.get("langgraph_node") or metadata.get("node_id") or metadata.get("name")
+                    if node_id and node_id != "__start__" and node_id != "__end__":
+                        self._storage.store_event(run_id, "node_started", {"node_id": node_id})
+                
+                # Capture node end events
+                elif "on_chain_end" in event_type:
+                    node_id = metadata.get("langgraph_node") or metadata.get("node_id") or metadata.get("name")
+                    if node_id and node_id != "__start__" and node_id != "__end__":
+                        self._storage.store_event(run_id, "node_completed", {"node_id": node_id})
+                
+                yield event
             
             # Mark run as completed
             self._storage.complete_run(run_id)
