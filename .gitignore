@@ -1,0 +1,5 @@
+__pycache__
+*.svg
+dist
+node_modules
+venv
