@@ -136,10 +136,17 @@ class FlowRecorder:
         Args:
             thread_id: Optional thread_id to use as run_id
         """
+        import sys
         run_id = thread_id or str(uuid.uuid4())
         self._current_run_id = run_id
+        print(f"[DEBUG FlowRecorder] astream called with thread_id: {thread_id}, run_id: {run_id}", file=sys.stderr)
+        
         self._storage.create_run(run_id)
         self._storage.store_event(run_id, "graph_started", {})
+        print(f"[DEBUG FlowRecorder] Created run and stored graph_started event", file=sys.stderr)
+        
+        # Track current subgraph context
+        current_subgraph = None
         
         try:
             # Use astream_events internally to capture node start events for storage
@@ -147,17 +154,55 @@ class FlowRecorder:
                 event_type = event.get("event", "")
                 metadata = event.get("metadata", {})
                 
-                # Capture node start events for storage only
+                print(f"[DEBUG FlowRecorder] Event type: {event_type}", file=sys.stderr)
+                
+                # Track subgraph entry/exit
                 if "on_chain_start" in event_type:
                     node_id = metadata.get("langgraph_node") or metadata.get("node_id") or metadata.get("name")
+                    print(f"[DEBUG FlowRecorder] on_chain_start - node_id: {node_id}, current_subgraph: {current_subgraph}", file=sys.stderr)
+                    
                     if node_id and node_id != "__start__" and node_id != "__end__":
-                        self._storage.store_event(run_id, "node_started", {"node_id": node_id})
+                        # Check if this node is a known subgraph (hardcoded for now)
+                        known_subgraphs = ["research_subgraph", "direct_executor"]
+                        
+                        if node_id in known_subgraphs:
+                            # This is a subgraph node entering
+                            current_subgraph = node_id
+                            print(f"[DEBUG FlowRecorder] Entering subgraph: {current_subgraph}", file=sys.stderr)
+                            self._storage.store_event(run_id, "subgraph_started", {"node_id": node_id})
+                            self._storage.store_event(run_id, "node_started", {"node_id": node_id})
+                        elif current_subgraph:
+                            # We're inside a subgraph, prefix the node ID
+                            full_node_id = f"{current_subgraph}.{node_id}"
+                            self._storage.store_event(run_id, "node_started", {"node_id": full_node_id, "parent": current_subgraph})
+                            print(f"[DEBUG FlowRecorder] Stored subgraph node_started for: {full_node_id}", file=sys.stderr)
+                        else:
+                            # Regular node in main graph
+                            self._storage.store_event(run_id, "node_started", {"node_id": node_id})
+                            print(f"[DEBUG FlowRecorder] Stored node_started for: {node_id}", file=sys.stderr)
                 
                 # Capture node end events for storage only
                 elif "on_chain_end" in event_type:
                     node_id = metadata.get("langgraph_node") or metadata.get("node_id") or metadata.get("name")
+                    print(f"[DEBUG FlowRecorder] on_chain_end - node_id: {node_id}, current_subgraph: {current_subgraph}", file=sys.stderr)
+                    
                     if node_id and node_id != "__start__" and node_id != "__end__":
-                        self._storage.store_event(run_id, "node_completed", {"node_id": node_id})
+                        known_subgraphs = ["research_subgraph", "direct_executor"]
+                        
+                        if current_subgraph and node_id == current_subgraph:
+                            # Exiting subgraph
+                            print(f"[DEBUG FlowRecorder] Exiting subgraph: {current_subgraph}", file=sys.stderr)
+                            self._storage.store_event(run_id, "subgraph_completed", {"node_id": current_subgraph})
+                            self._storage.store_event(run_id, "node_completed", {"node_id": current_subgraph})
+                            current_subgraph = None
+                        elif current_subgraph and node_id not in known_subgraphs:
+                            # This is an internal node of the current subgraph
+                            full_node_id = f"{current_subgraph}.{node_id}"
+                            self._storage.store_event(run_id, "node_completed", {"node_id": full_node_id, "parent": current_subgraph})
+                            print(f"[DEBUG FlowRecorder] Stored subgraph node_completed for: {full_node_id}", file=sys.stderr)
+                        else:
+                            self._storage.store_event(run_id, "node_completed", {"node_id": node_id})
+                            print(f"[DEBUG FlowRecorder] Stored node_completed for: {node_id}", file=sys.stderr)
                 
                 # Pass through custom chunks from output_formatter
                 if event.get("event") == "on_chain_end" and "output_formatter" in str(metadata):
@@ -168,12 +213,18 @@ class FlowRecorder:
             # Mark run as completed
             self._storage.complete_run(run_id)
             self._storage.store_event(run_id, "graph_completed", {})
+            print(f"[DEBUG FlowRecorder] Graph completed, events stored", file=sys.stderr)
+            print(f"[DEBUG FlowRecorder] Total events for run_id {run_id}: {len(self._storage.get_events(run_id))}", file=sys.stderr)
             
             # Auto-cleanup if not persisting
             if not self._storage.persist:
+                print(f"[DEBUG FlowRecorder] Auto-cleanup enabled, deleting events", file=sys.stderr)
                 self._storage.cleanup_run(run_id)
                 self._current_run_id = None
+            else:
+                print(f"[DEBUG FlowRecorder] Persist enabled, keeping events", file=sys.stderr)
         except Exception as e:
+            print(f"[DEBUG FlowRecorder] Error: {e}", file=sys.stderr)
             self._storage.store_event(run_id, "error", {"error": str(e)})
             raise
     
