@@ -1,5 +1,6 @@
 import { useEffect, useCallback, useRef, useState } from 'react';
-import ReactFlow, {
+import {
+  ReactFlow,
   type Node,
   type Edge,
   Background,
@@ -7,8 +8,8 @@ import ReactFlow, {
   useReactFlow,
   ReactFlowProvider,
   type NodeTypes,
-} from 'reactflow';
-import 'reactflow/dist/style.css';
+} from '@xyflow/react';
+import '@xyflow/react/dist/style.css';
 import { useGraphStore } from '../store';
 import CustomNode from './CustomNode';
 import type { GraphTopology, VisualizationEvent } from '../types';
@@ -21,57 +22,59 @@ interface LangGraphFlowProps {
   graphEndpoint: string;
   streamEndpoint: string;
   threadId?: string;
+  runEndpoint?: string;
 }
 
-function LangGraphFlowInner({ graphEndpoint, streamEndpoint, threadId }: LangGraphFlowProps) {
+function LangGraphFlowInner({ graphEndpoint, streamEndpoint, threadId, runEndpoint }: LangGraphFlowProps) {
   const { fitView, setCenter } = useReactFlow();
   const [nodes, setNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
+  const [localThreadId, setLocalThreadId] = useState<string | undefined>(threadId);
   const eventSourceRef = useRef<EventSource | null>(null);
-  
-  const { nodeStates, edgeStates, activeNodes, isRunning, handleEvent, reset } = useGraphStore();
 
-  // Load graph topology
+  const { nodeStates, edgeStates, activeNodes, isRunning, handleEvent, reset, setRunning } = useGraphStore();
+
   useEffect(() => {
     fetch(graphEndpoint)
       .then((res) => res.json())
       .then((data: GraphTopology) => {
-        
-        // Auto-layout nodes in a simple vertical flow
-        const layoutNodes = data.nodes.map((node, index) => ({
+        const layoutNodes: Node[] = data.nodes.map((node, index) => ({
           ...node,
+          id: node.id,
           type: 'custom',
           data: {
             ...node,
+            label: node.label ?? node.id,
             status: 'idle' as const,
           },
-          position: { x: 250, y: index * 150 },
+          position: node.position ?? { x: 250, y: index * 150 },
         }));
-        
+
         setNodes(layoutNodes);
-        
-        const layoutEdges = data.edges.map((edge) => ({
+
+        const layoutEdges: Edge[] = data.edges.map((edge) => ({
           ...edge,
           type: 'smoothstep',
           animated: false,
           style: { stroke: '#cbd5e1', strokeWidth: 2 },
         }));
-        
+
         setEdges(layoutEdges);
-        
-        // Fit view after layout
+
         setTimeout(() => fitView({ padding: 0.2 }), 100);
       })
       .catch(console.error);
   }, [graphEndpoint, fitView]);
 
-  // Connect to SSE stream
   useEffect(() => {
-    if (!threadId || !streamEndpoint) return;
+    const effectiveThreadId = threadId || localThreadId;
+    if (!effectiveThreadId || !streamEndpoint) return;
 
     reset();
-    
-    const url = `${streamEndpoint}/${threadId}`;
+    setRunning(true);
+
+    const separator = streamEndpoint.includes('?') ? '&' : '?';
+    const url = `${streamEndpoint}${separator}thread_id=${encodeURIComponent(effectiveThreadId)}`;
     const eventSource = new EventSource(url);
     eventSourceRef.current = eventSource;
 
@@ -79,6 +82,11 @@ function LangGraphFlowInner({ graphEndpoint, streamEndpoint, threadId }: LangGra
       try {
         const data: VisualizationEvent = JSON.parse(event.data);
         handleEvent(data);
+
+        if (data.type === 'graph_completed' || data.type === 'GraphCompleted') {
+          setRunning(false);
+          eventSource.close();
+        }
       } catch (e) {
         console.error('Failed to parse event:', e);
       }
@@ -87,14 +95,14 @@ function LangGraphFlowInner({ graphEndpoint, streamEndpoint, threadId }: LangGra
     eventSource.onerror = (error) => {
       console.error('SSE error:', error);
       eventSource.close();
+      setRunning(false);
     };
 
     return () => {
       eventSource.close();
     };
-  }, [threadId, streamEndpoint, handleEvent, reset]);
+  }, [threadId, localThreadId, streamEndpoint, handleEvent, reset, setRunning]);
 
-  // Update node visual states based on store
   useEffect(() => {
     setNodes((prevNodes) =>
       prevNodes.map((node) => {
@@ -110,14 +118,13 @@ function LangGraphFlowInner({ graphEndpoint, streamEndpoint, threadId }: LangGra
     );
   }, [nodeStates]);
 
-  // Update edge visual states based on store
   useEffect(() => {
     setEdges((prevEdges) =>
       prevEdges.map((edge) => {
         const status = edgeStates.get(edge.id) || 'idle';
         const isActive = status === 'active';
         const isCompleted = status === 'completed';
-        
+
         return {
           ...edge,
           animated: isActive,
@@ -130,7 +137,6 @@ function LangGraphFlowInner({ graphEndpoint, streamEndpoint, threadId }: LangGra
     );
   }, [edgeStates]);
 
-  // Camera control - focus on active nodes
   useEffect(() => {
     if (!isRunning || activeNodes.size === 0) return;
 
@@ -146,16 +152,21 @@ function LangGraphFlowInner({ graphEndpoint, streamEndpoint, threadId }: LangGra
   }, [activeNodes, isRunning, nodes, fitView, setCenter]);
 
   const handleRun = useCallback(async () => {
+    const newThreadId = `thread_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    setLocalThreadId(newThreadId);
+    reset();
+
     try {
-      const response = await fetch('http://localhost:8000/demo/run', {
+      const runUrl = runEndpoint || 'http://localhost:8000/demo/run';
+      await fetch(runUrl, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ thread_id: newThreadId }),
       });
-      const data = await response.json();
-      window.location.href = `?thread_id=${data.thread_id}`;
     } catch (e) {
       console.error('Failed to start graph:', e);
     }
-  }, []);
+  }, [runEndpoint, reset]);
 
   return (
     <div className="w-full h-screen bg-gray-50">
@@ -168,7 +179,7 @@ function LangGraphFlowInner({ graphEndpoint, streamEndpoint, threadId }: LangGra
           {isRunning ? 'Running...' : 'Run Graph'}
         </button>
       </div>
-      
+
       <ReactFlow
         nodes={nodes}
         edges={edges}

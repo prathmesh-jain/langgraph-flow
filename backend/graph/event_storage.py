@@ -7,11 +7,13 @@ from datetime import datetime
 
 
 class _EventStorage:
-    """Internal SQLite storage for FlowRecorder."""
+    """Internal SQLite storage for FlowRecorder with in-memory caching."""
     
     def __init__(self, db_path: str = "langgraph_events.db", persist: bool = False):
         self.db_path = db_path
         self.persist = persist
+        # In-memory event store for low-latency polling
+        self._memory_events: dict[str, list[dict]] = {}
         self._init_db()
     
     @contextmanager
@@ -57,11 +59,22 @@ class _EventStorage:
             )
     
     def store_event(self, run_id: str, event_type: str, data: dict) -> None:
-        with self._get_connection() as conn:
-            conn.execute(
-                "INSERT INTO events (run_id, event_type, data, timestamp) VALUES (?, ?, ?, ?)",
-                (run_id, event_type, json.dumps(data), datetime.now())
-            )
+        # Store in memory for low-latency polling
+        if run_id not in self._memory_events:
+            self._memory_events[run_id] = []
+        self._memory_events[run_id].append({
+            "type": event_type,
+            "data": data,
+            "timestamp": datetime.now().isoformat()
+        })
+        
+        # Store in persistent storage if persist flag is enabled
+        if self.persist:
+            with self._get_connection() as conn:
+                conn.execute(
+                    "INSERT INTO events (run_id, event_type, data, timestamp) VALUES (?, ?, ?, ?)",
+                    (run_id, event_type, json.dumps(data), datetime.now())
+                )
     
     def complete_run(self, run_id: str) -> None:
         with self._get_connection() as conn:
@@ -71,6 +84,11 @@ class _EventStorage:
             )
     
     def get_events(self, run_id: str) -> list[dict]:
+        # First check in-memory storage for low-latency access
+        if run_id in self._memory_events:
+            return self._memory_events[run_id]
+        
+        # Fall back to persistent storage if not in memory
         with self._get_connection() as conn:
             cursor = conn.execute(
                 "SELECT event_type, data, timestamp FROM events WHERE run_id = ? ORDER BY timestamp",
@@ -86,6 +104,11 @@ class _EventStorage:
             ]
     
     def cleanup_run(self, run_id: str) -> None:
+        # Clear from memory
+        if run_id in self._memory_events:
+            del self._memory_events[run_id]
+        
+        # Clear from persistent storage
         with self._get_connection() as conn:
             conn.execute("DELETE FROM events WHERE run_id = ?", [run_id])
             conn.execute("DELETE FROM runs WHERE id = ?", [run_id])
@@ -207,65 +230,70 @@ class FlowRecorder:
                                     print(f"[DEBUG FlowRecorder] Stored custom node_completed for: {node_id}", file=sys.stderr)
                                     yield {"type": "event", "data": {"type": "node_completed", "data": event_payload}}
                 
-                # Track subgraph entry/exit
-                if "on_chain_start" in event_type:
-                    node_id = metadata.get("langgraph_node") or metadata.get("node_id") or metadata.get("name")
-                    print(f"[DEBUG FlowRecorder] on_chain_start - node_id: {node_id}, current_subgraph: {current_subgraph}", file=sys.stderr)
-                    
-                    if node_id and node_id != "__start__" and node_id != "__end__":
-                        # Check if this node is a known subgraph (hardcoded for now)
-                        known_subgraphs = ["research_subgraph", "direct_executor"]
+                
+                # Capture stream_writer events directly
+                if event_type == "on_custom_event":
+                    custom_data = event.get("data", {})
+                    print(f"[DEBUG FlowRecorder] on_custom_event: {custom_data}", file=sys.stderr)
+                    if isinstance(custom_data, dict):
+                        custom_type = custom_data.get("type")
+                        custom_payload = custom_data.get("data", {})
                         
-                        if node_id in known_subgraphs:
-                            # This is a subgraph node entering
-                            current_subgraph = node_id
-                            print(f"[DEBUG FlowRecorder] Entering subgraph: {current_subgraph}", file=sys.stderr)
+                        if custom_type == "subgraph_started":
+                            node_id = custom_payload.get("node_id")
                             self._storage.store_event(run_id, "subgraph_started", {"node_id": node_id})
                             self._storage.store_event(run_id, "node_started", {"node_id": node_id})
-                            # Stream immediately for real-time updates
+                            print(f"[DEBUG FlowRecorder] Stored stream_writer subgraph_started for: {node_id}", file=sys.stderr)
                             yield {"type": "event", "data": {"type": "subgraph_started", "data": {"node_id": node_id}}}
                             yield {"type": "event", "data": {"type": "node_started", "data": {"node_id": node_id}}}
-                        elif current_subgraph:
-                            # We're inside a subgraph, prefix the node ID
-                            full_node_id = f"{current_subgraph}.{node_id}"
-                            self._storage.store_event(run_id, "node_started", {"node_id": full_node_id, "parent": current_subgraph})
-                            print(f"[DEBUG FlowRecorder] Stored subgraph node_started for: {full_node_id}", file=sys.stderr)
-                            yield {"type": "event", "data": {"type": "node_started", "data": {"node_id": full_node_id, "parent": current_subgraph}}}
-                        else:
-                            # Regular node in main graph
-                            self._storage.store_event(run_id, "node_started", {"node_id": node_id})
-                            print(f"[DEBUG FlowRecorder] Stored node_started for: {node_id}", file=sys.stderr)
-                            # Stream immediately for real-time updates
-                            yield {"type": "event", "data": {"type": "node_started", "data": {"node_id": node_id}}}
-                
-                # Capture node end events for storage only
-                elif "on_chain_end" in event_type:
-                    node_id = metadata.get("langgraph_node") or metadata.get("node_id") or metadata.get("name")
-                    print(f"[DEBUG FlowRecorder] on_chain_end - node_id: {node_id}, current_subgraph: {current_subgraph}", file=sys.stderr)
-                    
-                    if node_id and node_id != "__start__" and node_id != "__end__":
-                        known_subgraphs = ["research_subgraph", "direct_executor"]
                         
-                        if current_subgraph and node_id == current_subgraph:
-                            # Exiting subgraph
-                            print(f"[DEBUG FlowRecorder] Exiting subgraph: {current_subgraph}", file=sys.stderr)
-                            self._storage.store_event(run_id, "subgraph_completed", {"node_id": current_subgraph})
-                            self._storage.store_event(run_id, "node_completed", {"node_id": current_subgraph})
-                            current_subgraph = None
-                            # Stream immediately for real-time updates
+                        elif custom_type == "subgraph_completed":
+                            node_id = custom_payload.get("node_id")
+                            self._storage.store_event(run_id, "subgraph_completed", {"node_id": node_id})
+                            self._storage.store_event(run_id, "node_completed", {"node_id": node_id})
+                            print(f"[DEBUG FlowRecorder] Stored stream_writer subgraph_completed for: {node_id}", file=sys.stderr)
                             yield {"type": "event", "data": {"type": "subgraph_completed", "data": {"node_id": node_id}}}
                             yield {"type": "event", "data": {"type": "node_completed", "data": {"node_id": node_id}}}
-                        elif current_subgraph and node_id not in known_subgraphs:
-                            # This is an internal node of the current subgraph
-                            full_node_id = f"{current_subgraph}.{node_id}"
-                            self._storage.store_event(run_id, "node_completed", {"node_id": full_node_id, "parent": current_subgraph})
-                            print(f"[DEBUG FlowRecorder] Stored subgraph node_completed for: {full_node_id}", file=sys.stderr)
-                            yield {"type": "event", "data": {"type": "node_completed", "data": {"node_id": full_node_id, "parent": current_subgraph}}}
-                        else:
-                            self._storage.store_event(run_id, "node_completed", {"node_id": node_id})
-                            print(f"[DEBUG FlowRecorder] Stored node_completed for: {node_id}", file=sys.stderr)
-                            # Stream immediately for real-time updates
-                            yield {"type": "event", "data": {"type": "node_completed", "data": {"node_id": node_id}}}
+                        
+                        elif custom_type == "node_started":
+                            node_id = custom_payload.get("node_id")
+                            parent = custom_payload.get("parent")
+                            event_payload = {"node_id": node_id}
+                            if parent:
+                                event_payload["parent"] = parent
+                            self._storage.store_event(run_id, "node_started", event_payload)
+                            print(f"[DEBUG FlowRecorder] Stored stream_writer node_started for: {node_id}", file=sys.stderr)
+                            yield {"type": "event", "data": {"type": "node_started", "data": event_payload}}
+                        
+                        elif custom_type == "node_completed":
+                            node_id = custom_payload.get("node_id")
+                            parent = custom_payload.get("parent")
+                            event_payload = {"node_id": node_id}
+                            if parent:
+                                event_payload["parent"] = parent
+                            self._storage.store_event(run_id, "node_completed", event_payload)
+                            print(f"[DEBUG FlowRecorder] Stored stream_writer node_completed for: {node_id}", file=sys.stderr)
+                            yield {"type": "event", "data": {"type": "node_completed", "data": event_payload}}
+                
+                # Track node start events
+                if "on_chain_start" in event_type:
+                    node_id = metadata.get("langgraph_node") or metadata.get("node_id") or metadata.get("name")
+                    print(f"[DEBUG FlowRecorder] on_chain_start - node_id: {node_id}", file=sys.stderr)
+                    
+                    if node_id and node_id != "__start__" and node_id != "__end__":
+                        self._storage.store_event(run_id, "node_started", {"node_id": node_id})
+                        print(f"[DEBUG FlowRecorder] Stored node_started for: {node_id}", file=sys.stderr)
+                        yield {"type": "event", "data": {"type": "node_started", "data": {"node_id": node_id}}}
+                
+                # Track node end events
+                elif "on_chain_end" in event_type:
+                    node_id = metadata.get("langgraph_node") or metadata.get("node_id") or metadata.get("name")
+                    print(f"[DEBUG FlowRecorder] on_chain_end - node_id: {node_id}", file=sys.stderr)
+                    
+                    if node_id and node_id != "__start__" and node_id != "__end__":
+                        self._storage.store_event(run_id, "node_completed", {"node_id": node_id})
+                        print(f"[DEBUG FlowRecorder] Stored node_completed for: {node_id}", file=sys.stderr)
+                        yield {"type": "event", "data": {"type": "node_completed", "data": {"node_id": node_id}}}
                 
                 # Pass through custom chunks from output_formatter
                 if event.get("event") == "on_chain_end" and "output_formatter" in str(metadata):

@@ -5,7 +5,7 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from fastapi import Query
 from pydantic import BaseModel
-from .workflow import create_workflow
+from .workflow import create_workflow, create_subgraph
 from .event_storage import FlowRecorder
 
 
@@ -128,114 +128,157 @@ async def get_graph_topology():
     This endpoint extracts the graph structure from the compiled LangGraph
     including subgraph internal nodes and edges.
     """
-    # Get the underlying graph from FlowRecorder
     compiled_graph = flow._graph
     
     nodes = []
     edges = []
-    subgraph_nodes = set()
+    subgraph_nodes = []
+    subgraph_node_keys = set()
+    subgraph_templates = {}
+    parallel_execution_nodes = []
     
-    # Method 1: Try to get graph structure directly
     try:
         graph_structure = compiled_graph.get_graph()
         
-        # Extract nodes, skip __start__ and __end__ (they don't participate in visualization)
         for node_id in graph_structure.nodes:
             if node_id not in ["__start__", "__end__"]:
-                nodes.append({
-                    "id": node_id,
-                    "type": "default"
-                })
+                node_entry = {"id": node_id, "type": "default"}
+                nodes.append(node_entry)
         
-        # Try to extract edges using the graph's internal structure
-        # LangGraph stores edges in different ways depending on version
-        if hasattr(graph_structure, 'edges'):
-            # Try to iterate as a collection
-            try:
-                edge_list = list(graph_structure.edges)
-                for edge in edge_list:
-                    if isinstance(edge, tuple) and len(edge) >= 2:
-                        source = str(edge[0])
-                        target = str(edge[1])
-                        # Skip edges from/to __start__/__end__ since we don't show START/END nodes
-                        if "__start__" not in source and "__end__" not in target:
-                            if source != target:
-                                edges.append({"id": f"{source}-{target}", "source": source, "target": target})
-            except:
-                pass
+        def extract_edges(gs, source_prefix="", target_prefix="", subgraph_label=None):
+            extracted = []
+            if hasattr(gs, 'edges'):
+                try:
+                    edge_list = list(gs.edges)
+                    for edge in edge_list:
+                        if isinstance(edge, tuple) and len(edge) >= 2:
+                            source = source_prefix + str(edge[0]) if str(edge[0]) not in ["__start__", "__end__"] else None
+                            target = target_prefix + str(edge[1]) if str(edge[1]) not in ["__start__", "__end__"] else None
+                            if source and target:
+                                edge_entry = {
+                                    "id": f"{source}-{target}",
+                                    "source": source,
+                                    "target": target
+                                }
+                                if subgraph_label:
+                                    edge_entry["subgraph"] = subgraph_label
+                                extracted.append(edge_entry)
+                except:
+                    pass
+            if not extracted and hasattr(gs, 'all_edges'):
+                try:
+                    for edge in gs.all_edges():
+                        source = source_prefix + str(edge[0]) if str(edge[0]) not in ["__start__", "__end__"] else None
+                        target = target_prefix + str(edge[1]) if str(edge[1]) not in ["__start__", "__end__"] else None
+                        if source and target:
+                            edge_entry = {"id": f"{source}-{target}", "source": source, "target": target}
+                            if subgraph_label:
+                                edge_entry["subgraph"] = subgraph_label
+                            extracted.append(edge_entry)
+                except:
+                    pass
+            return extracted
         
-        # If no edges, try all_edges
-        if not edges and hasattr(graph_structure, 'all_edges'):
-            try:
-                for edge in graph_structure.all_edges():
-                    source = str(edge[0])
-                    target = str(edge[1])
-                    if "__start__" not in source and "__end__" not in target:
-                        if source != target:
-                            edges.append({"id": f"{source}-{target}", "source": source, "target": target})
-            except:
-                pass
+        edges = extract_edges(graph_structure)
         
-        # Try to extract subgraph internal structure
-        # Check if any node is a subgraph by checking if it has a get_graph method
         import sys
         print(f"[DEBUG] Checking {len(nodes)} nodes for subgraphs", file=sys.stderr)
+        
+        subgraph_template_instance = create_subgraph()
+        subgraph_template_structure = subgraph_template_instance.get_graph()
+        template_internal_nodes = []
+        template_internal_edges = []
+        
+        for sub_node_id in subgraph_template_structure.nodes:
+            if sub_node_id not in ["__start__", "__end__"]:
+                template_internal_nodes.append(sub_node_id)
+        
+        for t_edge in extract_edges(subgraph_template_structure):
+            template_internal_edges.append({
+                "source": t_edge["source"],
+                "target": t_edge["target"]
+            })
+        
+        print(f"[DEBUG] Subgraph template internal nodes: {template_internal_nodes}", file=sys.stderr)
+        
         for node in nodes:
             node_id = node["id"]
-            print(f"[DEBUG] Checking node: {node_id}", file=sys.stderr)
+            is_subgraph_node = False
+            
             try:
-                # Try to get the node from the compiled graph
                 if hasattr(compiled_graph, 'nodes') and node_id in compiled_graph.nodes:
                     node_obj = compiled_graph.nodes[node_id]
-                    print(f"[DEBUG] Node object type: {type(node_obj)}", file=sys.stderr)
-                    print(f"[DEBUG] Node object has get_graph: {hasattr(node_obj, 'get_graph')}", file=sys.stderr)
-                    # Check if this node is a subgraph (has get_graph method)
                     if hasattr(node_obj, 'get_graph'):
                         subgraph_structure = node_obj.get_graph()
-                        print(f"[DEBUG] Found subgraph in node: {node_id}", file=sys.stderr)
+                        print(f"[DEBUG] Found compiled subgraph in node: {node_id}", file=sys.stderr)
+                        is_subgraph_node = True
                         
-                        # Extract subgraph internal nodes
                         for sub_node_id in subgraph_structure.nodes:
                             if sub_node_id not in ["__start__", "__end__"]:
-                                # Mark as subgraph node with parent reference
                                 subgraph_internal_id = f"{node_id}.{sub_node_id}"
-                                subgraph_nodes.add(subgraph_internal_id)
+                                key = (subgraph_internal_id, node_id)
+                                if key not in subgraph_node_keys:
+                                    subgraph_node_keys.add(key)
+                                    subgraph_nodes.append({"id": subgraph_internal_id, "parent": node_id})
                                 nodes.append({
                                     "id": subgraph_internal_id,
                                     "type": "subgraph",
                                     "parent": node_id
                                 })
                         
-                        # Extract subgraph internal edges
-                        if hasattr(subgraph_structure, 'edges'):
-                            try:
-                                sub_edge_list = list(subgraph_structure.edges)
-                                for sub_edge in sub_edge_list:
-                                    if isinstance(sub_edge, tuple) and len(sub_edge) >= 2:
-                                        sub_source = str(sub_edge[0])
-                                        sub_target = str(sub_edge[1])
-                                        # Skip __start__/__end__ edges
-                                        if "__start__" not in sub_source and "__end__" not in sub_target:
-                                            if sub_source != sub_target:
-                                                sub_source_id = f"{node_id}.{sub_source}"
-                                                sub_target_id = f"{node_id}.{sub_target}"
-                                                edges.append({
-                                                    "id": f"{sub_source_id}-{sub_target_id}",
-                                                    "source": sub_source_id,
-                                                    "target": sub_target_id,
-                                                    "subgraph": node_id
-                                                })
-                            except:
-                                pass
+                        sub_edges = extract_edges(
+                            subgraph_structure,
+                            source_prefix=f"{node_id}.",
+                            target_prefix=f"{node_id}.",
+                            subgraph_label=node_id
+                        )
+                        edges.extend(sub_edges)
             except Exception as e:
-                print(f"[DEBUG] Error checking subgraph for {node_id}: {e}", file=sys.stderr)
-                pass
+                print(f"[DEBUG] Error checking compiled subgraph for {node_id}: {e}", file=sys.stderr)
+            
+            if node_id == "parallel_subgraphs":
+                is_subgraph_node = True
+                parallel_execution_nodes.append(node_id)
+                print(f"[DEBUG] Marking parallel_subgraphs as parallel execution node with template", file=sys.stderr)
+                
+                subgraph_templates[node_id] = {
+                    "pattern": r"^parallel_subgraphs_\d+$",
+                    "internal_nodes": template_internal_nodes,
+                    "internal_edges": template_internal_edges,
+                    "parallel": True,
+                    "upstream_node": "planner",
+                    "downstream_node": "analyzer"
+                }
+                
+                for sub_node_id in template_internal_nodes:
+                    subgraph_internal_id = f"{node_id}.{sub_node_id}"
+                    key = (subgraph_internal_id, node_id)
+                    if key not in subgraph_node_keys:
+                        subgraph_node_keys.add(key)
+                        subgraph_nodes.append({"id": subgraph_internal_id, "parent": node_id})
+                    nodes.append({
+                        "id": subgraph_internal_id,
+                        "type": "subgraph",
+                        "parent": node_id
+                    })
+                
+                for t_edge in template_internal_edges:
+                    sub_source_id = f"{node_id}.{t_edge['source']}"
+                    sub_target_id = f"{node_id}.{t_edge['target']}"
+                    edges.append({
+                        "id": f"{sub_source_id}-{sub_target_id}",
+                        "source": sub_source_id,
+                        "target": sub_target_id,
+                        "subgraph": node_id
+                    })
+            
+            if is_subgraph_node and not node.get("subgraph_info"):
+                node["type"] = "subgraph_parent"
                 
     except Exception as e:
         import sys
         print(f"Error getting graph structure: {e}", file=sys.stderr)
     
-    # Method 2: Fallback to mermaid parsing if direct extraction failed
     if not edges:
         try:
             mermaid_str = compiled_graph.get_graph().draw_mermaid()
@@ -257,11 +300,9 @@ async def get_graph_topology():
                         else:
                             target = target_part.rstrip(';')
                         
-                        # Clean up
                         source = source.replace('([', '').replace('])', '').replace('[[', '').replace(']]', '')
                         target = target.replace('([', '').replace('])', '').replace('[[', '').replace(']]', '')
                         
-                        # Skip __start__ and __end__ edges
                         if "__start__" not in source and "__end__" not in target:
                             if source != target and source and target:
                                 edges.append({"id": f"{source}-{target}", "source": source, "target": target})
@@ -275,14 +316,18 @@ async def get_graph_topology():
             print(f"Error parsing mermaid: {e}", file=sys.stderr)
     
     import sys
-    print(f"Final nodes: {nodes}", file=sys.stderr)
-    print(f"Final edges: {edges}", file=sys.stderr)
+    print(f"Final nodes: {len(nodes)} - {[n['id'] for n in nodes]}", file=sys.stderr)
+    print(f"Final edges: {len(edges)} - {[e['id'] for e in edges]}", file=sys.stderr)
     print(f"Subgraph nodes: {subgraph_nodes}", file=sys.stderr)
+    print(f"Subgraph templates: {list(subgraph_templates.keys())}", file=sys.stderr)
+    print(f"Parallel execution nodes: {parallel_execution_nodes}", file=sys.stderr)
     
     return {
         "nodes": nodes,
         "edges": edges,
-        "subgraph_nodes": list(subgraph_nodes)
+        "subgraph_nodes": subgraph_nodes,
+        "subgraph_templates": subgraph_templates,
+        "parallel_execution_nodes": parallel_execution_nodes
     }
 
 

@@ -120,36 +120,58 @@ def direct_executor(state: GraphState) -> GraphState:
 
 
 async def parallel_subgraphs(state: GraphState) -> GraphState:
-    """Execute multiple subgraph instances in parallel with event streaming."""
+    """Execute multiple subgraph instances in parallel with real-time event streaming."""
     subgraph_count = state.get("subgraph_count", 1)
     subgraph_template = create_subgraph()
     
-    # Collect custom events to return in output
-    custom_events = []
+    # Get stream writer for real-time event streaming
+    stream_writer = get_stream_writer()
     
-    # Emit subgraph start events for each instance
+    # Dynamically extract subgraph nodes from the template
+    subgraph_nodes = []
+    try:
+        # Get the graph structure from the compiled subgraph
+        graph_dict = subgraph_template.get_graph()
+        for node_id in graph_dict.nodes:
+            if node_id not in ["__start__", "__end__"]:
+                subgraph_nodes.append(node_id)
+    except Exception as e:
+        print(f"[DEBUG] Could not extract subgraph nodes: {e}", file=sys.stderr)
+        # Fallback to default nodes if extraction fails
+        subgraph_nodes = ["task_1", "task_2", "task_3", "subgraph_aggregator"]
+    
+    print(f"[DEBUG parallel_subgraphs] Extracted subgraph nodes: {subgraph_nodes}", file=sys.stderr)
+    
+    # Emit node start events for each parallel subgraph instance in real-time
     for i in range(subgraph_count):
         subgraph_id = f"parallel_subgraphs_{i+1}"
-        custom_events.append({"type": "subgraph_started", "data": {"node_id": subgraph_id}})
-        custom_events.append({"type": "node_started", "data": {"node_id": subgraph_id}})
+        stream_writer({
+            "type": "node_started",
+            "data": {"node_id": subgraph_id}
+        })
     
     # Create and execute subgraph instances in parallel
     async def execute_subgraph_instance(index: int):
-        """Execute a single subgraph instance with event streaming."""
+        """Execute a single subgraph instance with real-time event streaming."""
         subgraph_id = f"parallel_subgraphs_{index+1}"
         subgraph_input = {
             "status": "started",
             "task_results": [],
-            "current_task": "task_1"
+            "current_task": subgraph_nodes[0] if subgraph_nodes else "task_1"
         }
         
-        # Manually emit events for subgraph internal nodes
-        tasks_nodes = ["task_1", "task_2", "task_3", "subgraph_aggregator"]
-        for task_node in tasks_nodes:
+        # Dynamically emit events for subgraph internal nodes in real-time
+        for task_node in subgraph_nodes:
             full_node_id = f"{subgraph_id}.{task_node}"
-            custom_events.append({"type": "node_started", "data": {"node_id": full_node_id, "parent": subgraph_id}})
+            stream_writer({
+                "type": "node_started",
+                "data": {"node_id": full_node_id, "parent": subgraph_id}
+            })
             await asyncio.sleep(1)  # Simulate task execution
-            custom_events.append({"type": "node_completed", "data": {"node_id": full_node_id, "parent": subgraph_id}})
+            stream_writer({
+                "type": "node_completed",
+                "data": {"node_id": full_node_id, "parent": subgraph_id}
+            })
         
         return {"task_results": [f"{subgraph_id} completed"]}
     
@@ -157,11 +179,13 @@ async def parallel_subgraphs(state: GraphState) -> GraphState:
     tasks = [execute_subgraph_instance(i) for i in range(subgraph_count)]
     results = await asyncio.gather(*tasks)
     
-    # Emit subgraph completion events
+    # Emit node completion events for each parallel subgraph instance in real-time
     for i in range(subgraph_count):
         subgraph_id = f"parallel_subgraphs_{i+1}"
-        custom_events.append({"type": "subgraph_completed", "data": {"node_id": subgraph_id}})
-        custom_events.append({"type": "node_completed", "data": {"node_id": subgraph_id}})
+        stream_writer({
+            "type": "node_completed",
+            "data": {"node_id": subgraph_id}
+        })
     
     # Aggregate results from all subgraphs
     all_results = []
@@ -172,8 +196,7 @@ async def parallel_subgraphs(state: GraphState) -> GraphState:
         "status": "parallel_subgraphs_completed",
         "results": all_results,
         "current_step": "validation",
-        "execution_path": "parallel",
-        "__custom__": custom_events  # Embed custom events in output for FlowRecorder to capture
+        "execution_path": "parallel"
     }
 
 

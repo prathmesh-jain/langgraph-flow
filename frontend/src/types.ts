@@ -5,34 +5,55 @@ export type EventType =
   | 'GraphStarted'
   | 'GraphCompleted'
   | 'NodeStarted'
-  | 'NodeCompleted';
+  | 'NodeCompleted'
+  | 'graph_started'
+  | 'graph_completed'
+  | 'node_started'
+  | 'node_completed'
+  | 'subgraph_started'
+  | 'subgraph_completed'
+  | 'error';
 
 export interface VisualizationEvent {
   type: EventType;
-  timestamp: number;
-  thread_id: string;
-  run_id: string;
+  timestamp?: number | string;
+  thread_id?: string;
+  run_id?: string;
   node_id?: string;
+  data?: {
+    node_id?: string;
+    parent?: string;
+    [key: string]: any;
+  };
+  [key: string]: any;
 }
 
 export interface GraphNode {
   id: string;
   type: string;
-  label: string;
-  position: { x: number; y: number };
+  parent?: string;
+  label?: string;
+  position?: { x: number; y: number };
+  [key: string]: any;
 }
 
 export interface GraphEdge {
   id: string;
   source: string;
   target: string;
-  condition: string | null;
+  subgraph?: string;
+  condition?: string | null;
+  [key: string]: any;
 }
 
 export interface GraphTopology {
   nodes: GraphNode[];
   edges: GraphEdge[];
-  subgraphs: any[];
+  subgraph_nodes?: GraphNode[];
+  subgraphs?: any[];
+  subgraph_templates?: Record<string, any>;
+  parallel_execution_nodes?: string[];
+  [key: string]: any;
 }
 
 export interface NodeData extends GraphNode {
