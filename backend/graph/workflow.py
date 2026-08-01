@@ -11,7 +11,7 @@ import sys
 
 def task_1_node(state: SubgraphState) -> SubgraphState:
     """First task in subgraph."""
-    time.sleep(1)
+    time.sleep(3)
     return {
         "task_results": state.get("task_results", []) + ["Task 1 completed"],
         "current_task": "task_2"
@@ -29,7 +29,7 @@ def task_2_node(state: SubgraphState) -> SubgraphState:
 
 def task_3_node(state: SubgraphState) -> SubgraphState:
     """Third task in subgraph."""
-    time.sleep(1)
+    time.sleep(3)
     return {
         "task_results": state.get("task_results", []) + ["Task 3 completed"],
         "current_task": "aggregator"
@@ -63,6 +63,24 @@ def create_subgraph() -> StateGraph:
     return subgraph.compile()
 
 
+def create_analysis_subgraph() -> StateGraph:
+    """Create the analysis subgraph."""
+    subgraph = StateGraph(SubgraphState)
+    
+    subgraph.add_node("analysis_task_1", task_1_node)
+    subgraph.add_node("analysis_task_2", task_2_node)
+    subgraph.add_node("analysis_task_3", task_3_node)
+    subgraph.add_node("analysis_aggregator", subgraph_aggregator)
+    
+    subgraph.add_edge(START, "analysis_task_1")
+    subgraph.add_edge("analysis_task_1", "analysis_task_2")
+    subgraph.add_edge("analysis_task_2", "analysis_task_3")
+    subgraph.add_edge("analysis_task_3", "analysis_aggregator")
+    subgraph.add_edge("analysis_aggregator", END)
+    
+    return subgraph.compile()
+
+
 # ============ MAIN GRAPH NODES ============
 
 def input_processor(state: GraphState) -> GraphState:
@@ -76,7 +94,7 @@ def input_processor(state: GraphState) -> GraphState:
 
 def planner_node(state: GraphState) -> GraphState:
     """Planner node - creates execution plan and determines subgraph count based on state."""
-    time.sleep(2)
+    time.sleep(3)
     plan = ["research", "analysis", "validation", "output"]
     
     # Determine subgraph count from state (e.g., alert count from input)
@@ -101,16 +119,17 @@ def planner_node(state: GraphState) -> GraphState:
     }
 
 
-def route_decision(state: GraphState) -> Literal["parallel_subgraphs", "direct_executor"]:
+def route_decision(state: GraphState) -> list[str]:
     """Route to parallel subgraphs or direct execution based on plan."""
     if "research" in state.get("plan", []):
-        return "parallel_subgraphs"
-    return "direct_executor"
+        # Return both subgraph nodes for parallel execution
+        return ["research_subgraph", "analysis_subgraph"]
+    return ["direct_executor"]
 
 
 def direct_executor(state: GraphState) -> GraphState:
     """Direct execution path without subgraph."""
-    time.sleep(2)
+    time.sleep(3)
     return {
         "status": "direct_executed",
         "results": ["Direct execution result"],
@@ -119,85 +138,52 @@ def direct_executor(state: GraphState) -> GraphState:
     }
 
 
-async def parallel_subgraphs(state: GraphState) -> GraphState:
-    """Execute multiple subgraph instances in parallel with real-time event streaming."""
-    subgraph_count = state.get("subgraph_count", 1)
-    subgraph_template = create_subgraph()
+def create_workflow() -> StateGraph:
+    """Create and compile the complex LangGraph workflow with parallel subgraphs."""
+    workflow = StateGraph(GraphState)
     
-    # Get stream writer for real-time event streaming
-    stream_writer = get_stream_writer()
+    # Add main graph nodes
+    workflow.add_node("input_processor", input_processor)
+    workflow.add_node("planner", planner_node)
+    workflow.add_node("direct_executor", direct_executor)
+    workflow.add_node("analyzer", analyzer_node)
+    workflow.add_node("validator", validator_node)
+    workflow.add_node("output_formatter", output_formatter)
     
-    # Dynamically extract subgraph nodes from the template
-    subgraph_nodes = []
-    try:
-        # Get the graph structure from the compiled subgraph
-        graph_dict = subgraph_template.get_graph()
-        for node_id in graph_dict.nodes:
-            if node_id not in ["__start__", "__end__"]:
-                subgraph_nodes.append(node_id)
-    except Exception as e:
-        print(f"[DEBUG] Could not extract subgraph nodes: {e}", file=sys.stderr)
-        # Fallback to default nodes if extraction fails
-        subgraph_nodes = ["task_1", "task_2", "task_3", "subgraph_aggregator"]
+    # Add compiled subgraphs as nodes for parallel execution
+    # Note: These are actual compiled StateGraph objects that will be executed as subgraphs
+    research_subgraph = create_subgraph()
+    analysis_subgraph = create_analysis_subgraph()
     
-    print(f"[DEBUG parallel_subgraphs] Extracted subgraph nodes: {subgraph_nodes}", file=sys.stderr)
+    workflow.add_node("research_subgraph", research_subgraph)
+    workflow.add_node("analysis_subgraph", analysis_subgraph)
     
-    # Emit node start events for each parallel subgraph instance in real-time
-    for i in range(subgraph_count):
-        subgraph_id = f"parallel_subgraphs_{i+1}"
-        stream_writer({
-            "type": "node_started",
-            "data": {"node_id": subgraph_id}
-        })
+    # Add edges
+    workflow.add_edge(START, "input_processor")
+    workflow.add_edge("input_processor", "planner")
     
-    # Create and execute subgraph instances in parallel
-    async def execute_subgraph_instance(index: int):
-        """Execute a single subgraph instance with real-time event streaming."""
-        subgraph_id = f"parallel_subgraphs_{index+1}"
-        subgraph_input = {
-            "status": "started",
-            "task_results": [],
-            "current_task": subgraph_nodes[0] if subgraph_nodes else "task_1"
+    # Conditional routing from planner to parallel subgraphs
+    workflow.add_conditional_edges(
+        "planner",
+        route_decision,
+        {
+            "research_subgraph": "research_subgraph",
+            "analysis_subgraph": "analysis_subgraph",
+            "direct_executor": "direct_executor"
         }
-        
-        # Dynamically emit events for subgraph internal nodes in real-time
-        for task_node in subgraph_nodes:
-            full_node_id = f"{subgraph_id}.{task_node}"
-            stream_writer({
-                "type": "node_started",
-                "data": {"node_id": full_node_id, "parent": subgraph_id}
-            })
-            await asyncio.sleep(1)  # Simulate task execution
-            stream_writer({
-                "type": "node_completed",
-                "data": {"node_id": full_node_id, "parent": subgraph_id}
-            })
-        
-        return {"task_results": [f"{subgraph_id} completed"]}
+    )
     
-    # Execute all subgraph instances in parallel
-    tasks = [execute_subgraph_instance(i) for i in range(subgraph_count)]
-    results = await asyncio.gather(*tasks)
+    # Both subgraph paths converge at analyzer
+    workflow.add_edge("research_subgraph", "analyzer")
+    workflow.add_edge("analysis_subgraph", "analyzer")
+    workflow.add_edge("direct_executor", "analyzer")
     
-    # Emit node completion events for each parallel subgraph instance in real-time
-    for i in range(subgraph_count):
-        subgraph_id = f"parallel_subgraphs_{i+1}"
-        stream_writer({
-            "type": "node_completed",
-            "data": {"node_id": subgraph_id}
-        })
+    # Continue through validation and output
+    workflow.add_edge("analyzer", "validator")
+    workflow.add_edge("validator", "output_formatter")
+    workflow.add_edge("output_formatter", END)
     
-    # Aggregate results from all subgraphs
-    all_results = []
-    for i, result in enumerate(results):
-        all_results.extend(result.get("task_results", []))
-    
-    return {
-        "status": "parallel_subgraphs_completed",
-        "results": all_results,
-        "current_step": "validation",
-        "execution_path": "parallel"
-    }
+    return workflow.compile()
 
 
 def analyzer_node(state: GraphState) -> GraphState:
@@ -213,7 +199,7 @@ def analyzer_node(state: GraphState) -> GraphState:
 
 def validator_node(state: GraphState) -> GraphState:
     """Validate results."""
-    time.sleep(1)
+    time.sleep(3)
     return {
         "status": "validated",
         "results": state.get("results", []) + ["Validation passed"],
@@ -255,28 +241,37 @@ def create_workflow() -> StateGraph:
     # Add main graph nodes
     workflow.add_node("input_processor", input_processor)
     workflow.add_node("planner", planner_node)
-    workflow.add_node("parallel_subgraphs", parallel_subgraphs)
     workflow.add_node("direct_executor", direct_executor)
     workflow.add_node("analyzer", analyzer_node)
     workflow.add_node("validator", validator_node)
     workflow.add_node("output_formatter", output_formatter)
     
+    # Add compiled subgraphs as nodes for parallel execution
+    # Note: These are actual compiled StateGraph objects that will be executed as subgraphs
+    research_subgraph = create_subgraph()
+    analysis_subgraph = create_analysis_subgraph()
+    
+    workflow.add_node("research_subgraph", research_subgraph)
+    workflow.add_node("analysis_subgraph", analysis_subgraph)
+    
     # Add edges
     workflow.add_edge(START, "input_processor")
     workflow.add_edge("input_processor", "planner")
     
-    # Conditional routing from planner
+    # Conditional routing from planner to parallel subgraphs
     workflow.add_conditional_edges(
         "planner",
         route_decision,
         {
-            "parallel_subgraphs": "parallel_subgraphs",
+            "research_subgraph": "research_subgraph",
+            "analysis_subgraph": "analysis_subgraph",
             "direct_executor": "direct_executor"
         }
     )
     
-    # Both paths converge at analyzer
-    workflow.add_edge("parallel_subgraphs", "analyzer")
+    # Both subgraph paths converge at analyzer
+    workflow.add_edge("research_subgraph", "analyzer")
+    workflow.add_edge("analysis_subgraph", "analyzer")
     workflow.add_edge("direct_executor", "analyzer")
     
     # Continue through validation and output

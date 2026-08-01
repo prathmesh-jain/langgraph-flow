@@ -5,7 +5,7 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from fastapi import Query
 from pydantic import BaseModel
-from .workflow import create_workflow, create_subgraph
+from .workflow import create_workflow
 from .event_storage import FlowRecorder
 
 
@@ -184,23 +184,6 @@ async def get_graph_topology():
         import sys
         print(f"[DEBUG] Checking {len(nodes)} nodes for subgraphs", file=sys.stderr)
         
-        subgraph_template_instance = create_subgraph()
-        subgraph_template_structure = subgraph_template_instance.get_graph()
-        template_internal_nodes = []
-        template_internal_edges = []
-        
-        for sub_node_id in subgraph_template_structure.nodes:
-            if sub_node_id not in ["__start__", "__end__"]:
-                template_internal_nodes.append(sub_node_id)
-        
-        for t_edge in extract_edges(subgraph_template_structure):
-            template_internal_edges.append({
-                "source": t_edge["source"],
-                "target": t_edge["target"]
-            })
-        
-        print(f"[DEBUG] Subgraph template internal nodes: {template_internal_nodes}", file=sys.stderr)
-        
         for node in nodes:
             node_id = node["id"]
             is_subgraph_node = False
@@ -208,8 +191,8 @@ async def get_graph_topology():
             try:
                 if hasattr(compiled_graph, 'nodes') and node_id in compiled_graph.nodes:
                     node_obj = compiled_graph.nodes[node_id]
-                    if hasattr(node_obj, 'get_graph'):
-                        subgraph_structure = node_obj.get_graph()
+                    if hasattr(node_obj, 'subgraphs') and node_obj.subgraphs:
+                        subgraph_structure = node_obj.subgraphs[0]
                         print(f"[DEBUG] Found compiled subgraph in node: {node_id}", file=sys.stderr)
                         is_subgraph_node = True
                         
@@ -235,42 +218,6 @@ async def get_graph_topology():
                         edges.extend(sub_edges)
             except Exception as e:
                 print(f"[DEBUG] Error checking compiled subgraph for {node_id}: {e}", file=sys.stderr)
-            
-            if node_id == "parallel_subgraphs":
-                is_subgraph_node = True
-                parallel_execution_nodes.append(node_id)
-                print(f"[DEBUG] Marking parallel_subgraphs as parallel execution node with template", file=sys.stderr)
-                
-                subgraph_templates[node_id] = {
-                    "pattern": r"^parallel_subgraphs_\d+$",
-                    "internal_nodes": template_internal_nodes,
-                    "internal_edges": template_internal_edges,
-                    "parallel": True,
-                    "upstream_node": "planner",
-                    "downstream_node": "analyzer"
-                }
-                
-                for sub_node_id in template_internal_nodes:
-                    subgraph_internal_id = f"{node_id}.{sub_node_id}"
-                    key = (subgraph_internal_id, node_id)
-                    if key not in subgraph_node_keys:
-                        subgraph_node_keys.add(key)
-                        subgraph_nodes.append({"id": subgraph_internal_id, "parent": node_id})
-                    nodes.append({
-                        "id": subgraph_internal_id,
-                        "type": "subgraph",
-                        "parent": node_id
-                    })
-                
-                for t_edge in template_internal_edges:
-                    sub_source_id = f"{node_id}.{t_edge['source']}"
-                    sub_target_id = f"{node_id}.{t_edge['target']}"
-                    edges.append({
-                        "id": f"{sub_source_id}-{sub_target_id}",
-                        "source": sub_source_id,
-                        "target": sub_target_id,
-                        "subgraph": node_id
-                    })
             
             if is_subgraph_node and not node.get("subgraph_info"):
                 node["type"] = "subgraph_parent"

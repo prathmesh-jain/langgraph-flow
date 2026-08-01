@@ -4,6 +4,7 @@ import uuid
 from typing import AsyncGenerator, Optional, Any
 from contextlib import contextmanager
 from datetime import datetime
+import sys
 
 
 class _EventStorage:
@@ -138,23 +139,38 @@ class FlowRecorder:
         events = flow.get_events()
     """
     
-    def __init__(self, graph: Any, persist: bool = False, db_path: str = "langgraph_events.db"):
-        """Initialize FlowRecorder.
-        
-        Args:
-            graph: Compiled LangGraph graph
-            persist: If False, auto-deletes events after completion. If True, keeps them.
-            db_path: Path to SQLite database (internal, user doesn't need to know)
-        """
+    def __init__(self, graph, persist: bool = False):
         self._graph = graph
-        self._storage = _EventStorage(db_path, persist)
-        self._current_run_id: Optional[str] = None
+        self._storage = _EventStorage(persist=persist)
+        self._current_run_id = None
+        self._subgraph_topology = self._extract_subgraph_topology()
+    
+    def _extract_subgraph_topology(self) -> dict:
+        """Extract subgraph topology to map internal nodes to their parent subgraphs."""
+        topology = {}
+        try:
+            if hasattr(self._graph, 'nodes'):
+                print(f"[DEBUG FlowRecorder] Graph has nodes attribute", file=sys.stderr)
+                for node_id, node_obj in self._graph.nodes.items():
+                    print(f"[DEBUG FlowRecorder] Checking node {node_id}, has get_graph: {hasattr(node_obj, 'get_graph')}", file=sys.stderr)
+                    if hasattr(node_obj, 'get_graph'):
+                        subgraph_structure = node_obj.get_graph()
+                        print(f"[DEBUG FlowRecorder] Subgraph {node_id} has nodes: {list(subgraph_structure.nodes)}", file=sys.stderr)
+                        for sub_node_id in subgraph_structure.nodes:
+                            if sub_node_id not in ["__start__", "__end__"]:
+                                topology[sub_node_id] = node_id
+                                print(f"[DEBUG FlowRecorder] Mapping {sub_node_id} -> {node_id}", file=sys.stderr)
+        except Exception as e:
+            print(f"[DEBUG FlowRecorder] Error extracting subgraph topology: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
+        print(f"[DEBUG FlowRecorder] Final topology: {topology}", file=sys.stderr)
+        return topology
     
     async def astream(self, inputs: dict, config: dict, thread_id: Optional[str] = None, **kwargs) -> AsyncGenerator:
         """Stream graph execution while recording events.
         
-        This method transparently passes through all chunks from the original graph
-        while storing events internally for later retrieval via /stream endpoint.
+        This method streams graph execution while storing events internally for later retrieval via /stream endpoint.
         
         Args:
             thread_id: Optional thread_id to use as run_id
@@ -170,54 +186,59 @@ class FlowRecorder:
         
         # Track current subgraph context
         current_subgraph = None
+        subgraph_stack = []  # Stack to handle nested subgraphs
+        
+        # Get list of subgraph nodes from the compiled graph
+        subgraph_nodes = set()
+        try:
+            if hasattr(self._graph, 'nodes'):
+                for node_id, node_obj in self._graph.nodes.items():
+                    if hasattr(node_obj, 'get_graph'):
+                        subgraph_nodes.add(node_id)
+        except:
+            pass
+        
+        print(f"[DEBUG FlowRecorder] Detected subgraph nodes: {subgraph_nodes}", file=sys.stderr)
         
         try:
-            # Use astream_events internally to capture node start events for storage
+            # Use astream_events with v2 for better compatibility with custom events
+            # v3 requires transformers which adds complexity for our use case
+            if "stream_mode" not in kwargs:
+                kwargs["stream_mode"] = ["updates", "custom"]
+            kwargs["version"] = "v2"
+            # Enable subgraph streaming to capture internal subgraph node events
+            kwargs["subgraphs"] = True
+            
             async for event in self._graph.astream_events(inputs, config, **kwargs):
                 event_type = event.get("event", "")
                 metadata = event.get("metadata", {})
+                data = event.get("data", {})
                 
-                print(f"[DEBUG FlowRecorder] Event type: {event_type}", file=sys.stderr)
+                print(f"[DEBUG FlowRecorder] Event type: {event_type}, metadata: {metadata}, data: {data}", file=sys.stderr)
                 
                 # Capture custom events from stream_writer (for parallel subgraphs)
-                # These are emitted via get_stream_writer() in workflow nodes
+                # In v2, custom events come through as on_chain_end with custom data
                 if event_type == "on_chain_end":
-                    output = event.get("data", {}).get("output", {})
+                    output = data.get("output", {})
                     print(f"[DEBUG FlowRecorder] on_chain_end output: {output}", file=sys.stderr)
+                    
                     if isinstance(output, dict):
-                        # Check for custom event markers
+                        # Check for custom event markers in output
                         if "__custom__" in output:
                             custom_events = output.get("__custom__", [])
-                            print(f"[DEBUG FlowRecorder] Found {len(custom_events)} custom events", file=sys.stderr)
+                            print(f"[DEBUG FlowRecorder] Found {len(custom_events)} custom events in __custom__", file=sys.stderr)
                             for custom_event in custom_events:
                                 custom_type = custom_event.get("type")
                                 custom_data = custom_event.get("data", {})
                                 
-                                if custom_type == "subgraph_started":
-                                    node_id = custom_data.get("node_id")
-                                    self._storage.store_event(run_id, "subgraph_started", {"node_id": node_id})
-                                    self._storage.store_event(run_id, "node_started", {"node_id": node_id})
-                                    print(f"[DEBUG FlowRecorder] Stored custom subgraph_started for: {node_id}", file=sys.stderr)
-                                    # Stream immediately for real-time updates
-                                    yield {"type": "event", "data": {"type": "subgraph_started", "data": {"node_id": node_id}}}
-                                    yield {"type": "event", "data": {"type": "node_started", "data": {"node_id": node_id}}}
-                                
-                                elif custom_type == "subgraph_completed":
-                                    node_id = custom_data.get("node_id")
-                                    self._storage.store_event(run_id, "subgraph_completed", {"node_id": node_id})
-                                    self._storage.store_event(run_id, "node_completed", {"node_id": node_id})
-                                    print(f"[DEBUG FlowRecorder] Stored custom subgraph_completed for: {node_id}", file=sys.stderr)
-                                    yield {"type": "event", "data": {"type": "subgraph_completed", "data": {"node_id": node_id}}}
-                                    yield {"type": "event", "data": {"type": "node_completed", "data": {"node_id": node_id}}}
-                                
-                                elif custom_type == "node_started":
+                                if custom_type == "node_started":
                                     node_id = custom_data.get("node_id")
                                     parent = custom_data.get("parent")
                                     event_payload = {"node_id": node_id}
                                     if parent:
                                         event_payload["parent"] = parent
                                     self._storage.store_event(run_id, "node_started", event_payload)
-                                    print(f"[DEBUG FlowRecorder] Stored custom node_started for: {node_id}", file=sys.stderr)
+                                    print(f"[DEBUG FlowRecorder] Stored node_started for: {node_id} with parent: {parent}", file=sys.stderr)
                                     yield {"type": "event", "data": {"type": "node_started", "data": event_payload}}
                                 
                                 elif custom_type == "node_completed":
@@ -227,73 +248,98 @@ class FlowRecorder:
                                     if parent:
                                         event_payload["parent"] = parent
                                     self._storage.store_event(run_id, "node_completed", event_payload)
-                                    print(f"[DEBUG FlowRecorder] Stored custom node_completed for: {node_id}", file=sys.stderr)
+                                    print(f"[DEBUG FlowRecorder] Stored node_completed for: {node_id} with parent: {parent}", file=sys.stderr)
                                     yield {"type": "event", "data": {"type": "node_completed", "data": event_payload}}
-                
-                
-                # Capture stream_writer events directly
-                if event_type == "on_custom_event":
-                    custom_data = event.get("data", {})
-                    print(f"[DEBUG FlowRecorder] on_custom_event: {custom_data}", file=sys.stderr)
-                    if isinstance(custom_data, dict):
-                        custom_type = custom_data.get("type")
-                        custom_payload = custom_data.get("data", {})
-                        
-                        if custom_type == "subgraph_started":
-                            node_id = custom_payload.get("node_id")
-                            self._storage.store_event(run_id, "subgraph_started", {"node_id": node_id})
-                            self._storage.store_event(run_id, "node_started", {"node_id": node_id})
-                            print(f"[DEBUG FlowRecorder] Stored stream_writer subgraph_started for: {node_id}", file=sys.stderr)
-                            yield {"type": "event", "data": {"type": "subgraph_started", "data": {"node_id": node_id}}}
-                            yield {"type": "event", "data": {"type": "node_started", "data": {"node_id": node_id}}}
-                        
-                        elif custom_type == "subgraph_completed":
-                            node_id = custom_payload.get("node_id")
-                            self._storage.store_event(run_id, "subgraph_completed", {"node_id": node_id})
-                            self._storage.store_event(run_id, "node_completed", {"node_id": node_id})
-                            print(f"[DEBUG FlowRecorder] Stored stream_writer subgraph_completed for: {node_id}", file=sys.stderr)
-                            yield {"type": "event", "data": {"type": "subgraph_completed", "data": {"node_id": node_id}}}
-                            yield {"type": "event", "data": {"type": "node_completed", "data": {"node_id": node_id}}}
-                        
-                        elif custom_type == "node_started":
-                            node_id = custom_payload.get("node_id")
-                            parent = custom_payload.get("parent")
-                            event_payload = {"node_id": node_id}
-                            if parent:
-                                event_payload["parent"] = parent
-                            self._storage.store_event(run_id, "node_started", event_payload)
-                            print(f"[DEBUG FlowRecorder] Stored stream_writer node_started for: {node_id}", file=sys.stderr)
-                            yield {"type": "event", "data": {"type": "node_started", "data": event_payload}}
-                        
-                        elif custom_type == "node_completed":
-                            node_id = custom_payload.get("node_id")
-                            parent = custom_payload.get("parent")
-                            event_payload = {"node_id": node_id}
-                            if parent:
-                                event_payload["parent"] = parent
-                            self._storage.store_event(run_id, "node_completed", event_payload)
-                            print(f"[DEBUG FlowRecorder] Stored stream_writer node_completed for: {node_id}", file=sys.stderr)
-                            yield {"type": "event", "data": {"type": "node_completed", "data": event_payload}}
                 
                 # Track node start events
                 if "on_chain_start" in event_type:
                     node_id = metadata.get("langgraph_node") or metadata.get("node_id") or metadata.get("name")
-                    print(f"[DEBUG FlowRecorder] on_chain_start - node_id: {node_id}", file=sys.stderr)
+                    print(f"[DEBUG FlowRecorder] on_chain_start - node_id: {node_id}, current_subgraph: {current_subgraph}", file=sys.stderr)
                     
                     if node_id and node_id != "__start__" and node_id != "__end__":
-                        self._storage.store_event(run_id, "node_started", {"node_id": node_id})
-                        print(f"[DEBUG FlowRecorder] Stored node_started for: {node_id}", file=sys.stderr)
-                        yield {"type": "event", "data": {"type": "node_started", "data": {"node_id": node_id}}}
+                        # Extract parent from checkpoint_ns metadata
+                        checkpoint_ns = metadata.get("checkpoint_ns", "")
+                        parent_from_ns = None
+                        if checkpoint_ns and "|" in checkpoint_ns:
+                            # Format: subgraph_name:uuid|node_id:uuid
+                            parent_from_ns = checkpoint_ns.split("|")[0].split(":")[0]
+                        elif checkpoint_ns and ":" in checkpoint_ns:
+                            # Format: subgraph_name:uuid
+                            parent_from_ns = checkpoint_ns.split(":")[0]
+                        
+                        # Check if this node is a subgraph
+                        if node_id in subgraph_nodes:
+                            # Push to subgraph stack
+                            subgraph_stack.append(node_id)
+                            current_subgraph = node_id
+                            print(f"[DEBUG FlowRecorder] Entering subgraph: {node_id}", file=sys.stderr)
+                        
+                        # Determine parent and format node_id for frontend
+                        parent = None
+                        formatted_node_id = node_id
+                        
+                        if parent_from_ns and parent_from_ns != node_id:
+                            parent = parent_from_ns
+                            formatted_node_id = f"{parent_from_ns}.{node_id}"
+                            print(f"[DEBUG FlowRecorder] Formatting node_id as {formatted_node_id} from checkpoint_ns", file=sys.stderr)
+                        elif node_id in self._subgraph_topology:
+                            parent = self._subgraph_topology[node_id]
+                            formatted_node_id = f"{parent}.{node_id}"
+                            print(f"[DEBUG FlowRecorder] Formatting node_id as {formatted_node_id} from topology", file=sys.stderr)
+                        elif current_subgraph and node_id != current_subgraph:
+                            parent = current_subgraph
+                            formatted_node_id = f"{current_subgraph}.{node_id}"
+                            print(f"[DEBUG FlowRecorder] Formatting node_id as {formatted_node_id} from current_subgraph", file=sys.stderr)
+                        
+                        event_payload = {"node_id": formatted_node_id}
+                        if parent:
+                            event_payload["parent"] = parent
+                        
+                        self._storage.store_event(run_id, "node_started", event_payload)
+                        yield {"type": "event", "data": {"type": "node_started", "data": event_payload}}
                 
                 # Track node end events
                 elif "on_chain_end" in event_type:
                     node_id = metadata.get("langgraph_node") or metadata.get("node_id") or metadata.get("name")
-                    print(f"[DEBUG FlowRecorder] on_chain_end - node_id: {node_id}", file=sys.stderr)
+                    print(f"[DEBUG FlowRecorder] on_chain_end - node_id: {node_id}, current_subgraph: {current_subgraph}", file=sys.stderr)
                     
                     if node_id and node_id != "__start__" and node_id != "__end__":
-                        self._storage.store_event(run_id, "node_completed", {"node_id": node_id})
-                        print(f"[DEBUG FlowRecorder] Stored node_completed for: {node_id}", file=sys.stderr)
-                        yield {"type": "event", "data": {"type": "node_completed", "data": {"node_id": node_id}}}
+                        # Extract parent from checkpoint_ns metadata
+                        checkpoint_ns = metadata.get("checkpoint_ns", "")
+                        parent_from_ns = None
+                        if checkpoint_ns and "|" in checkpoint_ns:
+                            # Format: subgraph_name:uuid|node_id:uuid
+                            parent_from_ns = checkpoint_ns.split("|")[0].split(":")[0]
+                        elif checkpoint_ns and ":" in checkpoint_ns:
+                            # Format: subgraph_name:uuid
+                            parent_from_ns = checkpoint_ns.split(":")[0]
+                        
+                        # Determine parent and format node_id for frontend
+                        parent = None
+                        formatted_node_id = node_id
+                        
+                        if parent_from_ns and parent_from_ns != node_id:
+                            parent = parent_from_ns
+                            formatted_node_id = f"{parent_from_ns}.{node_id}"
+                        elif node_id in self._subgraph_topology:
+                            parent = self._subgraph_topology[node_id]
+                            formatted_node_id = f"{parent}.{node_id}"
+                        elif current_subgraph and node_id != current_subgraph:
+                            parent = current_subgraph
+                            formatted_node_id = f"{current_subgraph}.{node_id}"
+                        
+                        event_payload = {"node_id": formatted_node_id}
+                        if parent:
+                            event_payload["parent"] = parent
+                        
+                        self._storage.store_event(run_id, "node_completed", event_payload)
+                        yield {"type": "event", "data": {"type": "node_completed", "data": event_payload}}
+                        
+                        # Check if we're exiting a subgraph
+                        if node_id in subgraph_nodes and subgraph_stack:
+                            exited_subgraph = subgraph_stack.pop()
+                            print(f"[DEBUG FlowRecorder] Exiting subgraph: {exited_subgraph}", file=sys.stderr)
+                            current_subgraph = subgraph_stack[-1] if subgraph_stack else None
                 
                 # Pass through custom chunks from output_formatter
                 if event.get("event") == "on_chain_end" and "output_formatter" in str(metadata):
@@ -343,13 +389,23 @@ class FlowRecorder:
                 if "on_chain_start" in event_type:
                     node_id = metadata.get("langgraph_node") or metadata.get("node_id") or metadata.get("name")
                     if node_id and node_id != "__start__" and node_id != "__end__":
-                        self._storage.store_event(run_id, "node_started", {"node_id": node_id})
+                        event_payload = {"node_id": node_id}
+                        # Use topology to infer parent
+                        if node_id in self._subgraph_topology:
+                            parent = self._subgraph_topology[node_id]
+                            event_payload["parent"] = parent
+                        self._storage.store_event(run_id, "node_started", event_payload)
                 
                 # Capture node end events
                 elif "on_chain_end" in event_type:
                     node_id = metadata.get("langgraph_node") or metadata.get("node_id") or metadata.get("name")
                     if node_id and node_id != "__start__" and node_id != "__end__":
-                        self._storage.store_event(run_id, "node_completed", {"node_id": node_id})
+                        event_payload = {"node_id": node_id}
+                        # Use topology to infer parent
+                        if node_id in self._subgraph_topology:
+                            parent = self._subgraph_topology[node_id]
+                            event_payload["parent"] = parent
+                        self._storage.store_event(run_id, "node_completed", event_payload)
                 
                 yield event
             
