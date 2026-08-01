@@ -9,6 +9,7 @@ class GraphState(TypedDict):
     current_step: str
     results: List[str]
     execution_path: str
+    subgraph_count: int
 
 
 class SubgraphState(TypedDict):

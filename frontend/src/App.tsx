@@ -108,7 +108,7 @@ function computeLayout(
         expandedSubgraphLayers.add(layerIndex);
         // Count subgraph internal nodes for this parent
         const count = subgraphNodes.filter(n => n.parent === nodeId).length;
-        subgraphNodeCounts[layerIndex] = count;
+        subgraphNodeCounts[layerIndex] = (subgraphNodeCounts[layerIndex] || 0) + count;
       }
     });
   });
@@ -121,7 +121,7 @@ function computeLayout(
     let y = 50;
     for (let i = 0; i < layerIndex; i++) {
       if (expandedSubgraphLayers.has(i)) {
-        // Add extra space after expanded subgraph layer based on node count
+        // Add extra space after expanded subgraph layer based on total node count
         const nodeCount = subgraphNodeCounts[i] || 0;
         const extraSpace = nodeCount * 70 + 50; // Space for linear subgraph layout
         y += layerHeight + extraSpace;
@@ -139,6 +139,50 @@ function computeLayout(
   });
   
   // Position subgraph nodes in a linear layout below their parent
+  // Handle multiple parallel subgraphs by offsetting them horizontally
+  const parallelSubgraphParents = new Set<string>();
+  subgraphNodes.forEach(subNode => {
+    if (subNode.parent) parallelSubgraphParents.add(subNode.parent);
+  });
+  
+  const parentXOffsets: Record<string, number> = {};
+  let xOffset = 0;
+  parallelSubgraphParents.forEach(parentId => {
+    parentXOffsets[parentId] = xOffset;
+    xOffset += 150; // Offset each parallel subgraph by 150px
+  });
+  
+  // First, ensure parent nodes have positions (for dynamically created parents)
+  parallelSubgraphParents.forEach(parentId => {
+    if (!positions[parentId]) {
+      // Find the layer where this parent should be (after planner, before analyzer)
+      // For parallel_subgraphs nodes, place them in the layer after input_processor
+      const plannerLayerIndex = layers.findIndex(layer => layer.includes('planner'));
+      if (plannerLayerIndex >= 0) {
+        // Position in the next layer
+        const layerIndex = plannerLayerIndex + 1;
+        const layerWidth = 180 + 50; // nodeWidth + nodeGap
+        const startX = (800 - layerWidth) / 2 + 180 / 2;
+        
+        let y = 50;
+        for (let i = 0; i < layerIndex; i++) {
+          y += 100; // layerHeight
+        }
+        
+        positions[parentId] = {
+          x: startX + (parentXOffsets[parentId] || 0),
+          y: y
+        };
+      } else {
+        // Fallback: position at default location
+        positions[parentId] = {
+          x: 400 + (parentXOffsets[parentId] || 0),
+          y: 150
+        };
+      }
+    }
+  });
+  
   subgraphNodes.forEach(subNode => {
     const parentId = subNode.parent;
     if (parentId && positions[parentId] && expandedSubgraphs.has(parentId)) {
@@ -146,9 +190,10 @@ function computeLayout(
       // Position subgraph nodes in a linear layout below the parent
       const subNodeIndex = subgraphNodes.filter(n => n.parent === parentId).indexOf(subNode);
       const offsetY = (subNodeIndex + 1) * 70; // 70, 140, 210, 280, etc.
+      const offsetX = parentXOffsets[parentId] || 0;
       
       positions[subNode.id] = {
-        x: parentPos.x,
+        x: parentPos.x + offsetX,
         y: parentPos.y + offsetY
       };
     }
@@ -173,6 +218,9 @@ function GraphVisualization({
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [topologyLoaded, setTopologyLoaded] = useState(false);
   const [expandedSubgraphs, setExpandedSubgraphs] = useState<Set<string>>(new Set());
+  const [topology, setTopology] = useState<GraphTopology | null>(null);
+  const [dynamicNodes, setDynamicNodes] = useState<any[]>([]);
+  const [dynamicEdges, setDynamicEdges] = useState<any[]>([]);
 
   const onConnect = useCallback(
     (params: Connection) => setEdges((eds) => addEdge(params, eds)),
@@ -190,6 +238,9 @@ function GraphVisualization({
         
         console.log('Received topology:', topology);
         console.log('Subgraph nodes:', topology.subgraph_nodes);
+        
+        // Store topology for dynamic node creation
+        setTopology(topology);
         
         // Use automatic layout algorithm based on backend topology
         const layoutPositions = computeLayout(topology.nodes, topology.edges, expandedSubgraphs);
@@ -307,7 +358,7 @@ function GraphVisualization({
     };
 
     loadTopology();
-  }, [showGraph, shouldLoadTopology, topologyLoaded, nodeStatus, setNodes, setEdges]);
+  }, [showGraph, shouldLoadTopology, topologyLoaded, setNodes, setEdges]);
 
   // Update node and edge styles when status changes
   useEffect(() => {
@@ -345,19 +396,68 @@ function GraphVisualization({
     );
   }, [nodeStatus, topologyLoaded, setNodes]);
 
-  // Auto-expand subgraphs when they start executing
+  // Auto-expand subgraphs when they start executing and dynamically create nodes
   useEffect(() => {
     if (!autoExpandSubgraphs) return;
     
     const newExpanded = new Set(expandedSubgraphs);
+    const newDynamicNodes = [...dynamicNodes];
+    const newDynamicEdges = [...dynamicEdges];
     
     Object.entries(nodeStatus).forEach(([nodeId, status]) => {
-      // Check if this node is a subgraph parent (hardcoded for now)
-      const isSubgraphParent = nodeId === 'research_subgraph' || nodeId === 'direct_executor';
+      // Check if this node is a subgraph parent (dynamic detection)
+      const isSubgraphParent = nodeId.startsWith('parallel_subgraphs_') || nodeId === 'research_subgraph' || nodeId === 'direct_executor';
       
       if (isSubgraphParent && status === 'running' && !newExpanded.has(nodeId)) {
         console.log(`Auto-expanding subgraph: ${nodeId}`);
         newExpanded.add(nodeId);
+        
+        // Dynamically create internal nodes for parallel subgraph instances
+        if (nodeId.startsWith('parallel_subgraphs_') && !newDynamicNodes.find(n => n.id === nodeId)) {
+          // First, create the parent node if it doesn't exist in topology
+          if (!topology?.nodes.find(n => n.id === nodeId)) {
+            newDynamicNodes.push({
+              id: nodeId,
+              type: 'default'
+            });
+            
+            // Add edges to connect this dynamic parent to the graph
+            // Connect from planner to this node
+            newDynamicEdges.push({
+              id: `planner-${nodeId}`,
+              source: 'planner',
+              target: nodeId
+            });
+            // Connect from this node to analyzer
+            newDynamicEdges.push({
+              id: `${nodeId}-analyzer`,
+              source: nodeId,
+              target: 'analyzer'
+            });
+          }
+          
+          const subgraphInternalNodes = ['task_1', 'task_2', 'task_3', 'subgraph_aggregator'];
+          subgraphInternalNodes.forEach((internalNode, index) => {
+            const fullId = `${nodeId}.${internalNode}`;
+            if (!newDynamicNodes.find(n => n.id === fullId)) {
+              newDynamicNodes.push({
+                id: fullId,
+                type: 'subgraph',
+                parent: nodeId
+              });
+              // Add internal edges
+              if (index < subgraphInternalNodes.length - 1) {
+                const nextFullId = `${nodeId}.${subgraphInternalNodes[index + 1]}`;
+                newDynamicEdges.push({
+                  id: `${fullId}-${nextFullId}`,
+                  source: fullId,
+                  target: nextFullId,
+                  subgraph: nodeId
+                });
+              }
+            }
+          });
+        }
       }
       
       // Auto-collapse when subgraph completes
@@ -370,16 +470,123 @@ function GraphVisualization({
     if (newExpanded.size !== expandedSubgraphs.size) {
       setExpandedSubgraphs(newExpanded);
     }
-  }, [nodeStatus, autoExpandSubgraphs, expandedSubgraphs, setExpandedSubgraphs]);
-  
-  // Reload topology when subgraphs expand/collapse
-  useEffect(() => {
-    if (!topologyLoaded) return;
     
-    // Trigger topology reload to show/hide subgraph nodes
-    setTopologyLoaded(false);
-    setTimeout(() => setTopologyLoaded(true), 100);
-  }, [expandedSubgraphs]);
+    if (newDynamicNodes.length !== dynamicNodes.length || newDynamicEdges.length !== dynamicEdges.length) {
+      setDynamicNodes(newDynamicNodes);
+      setDynamicEdges(newDynamicEdges);
+    }
+  }, [nodeStatus, autoExpandSubgraphs, expandedSubgraphs, dynamicNodes, dynamicEdges]);
+  
+  // Update graph when subgraphs expand/collapse (without full reload)
+  useEffect(() => {
+    if (!topology || !topologyLoaded) return;
+    
+    // Combine static topology with dynamic nodes
+    const allNodes = [...topology.nodes, ...dynamicNodes];
+    const allEdges = [...topology.edges, ...dynamicEdges];
+    
+    // Use automatic layout algorithm based on combined topology
+    const layoutPositions = computeLayout(allNodes, allEdges, expandedSubgraphs);
+    
+    // Filter nodes based on expanded subgraphs
+    const visibleNodes = allNodes.filter(node => {
+      if (node.type === 'subgraph') {
+        // Show subgraph internal nodes only if parent is expanded
+        const parentId = node.parent;
+        return parentId && expandedSubgraphs.has(parentId);
+      }
+      return true;
+    });
+    
+    // Filter edges based on expanded subgraphs
+    const visibleEdges = allEdges.filter(edge => {
+      if (edge.subgraph) {
+        return expandedSubgraphs.has(edge.subgraph);
+      }
+      return true;
+    });
+
+    // Convert backend nodes to React Flow nodes
+    const flowNodes: Node[] = visibleNodes.map(node => {
+      const position = layoutPositions[node.id] || { x: 0, y: 0 };
+      const status = nodeStatus[node.id];
+      
+      let backgroundColor = '#f3f4f6';
+      let borderColor = '#d1d5db';
+      let boxShadow = 'none';
+      let nodeWidth = 180;
+      
+      if (status === 'running') {
+        backgroundColor = '#fef3c7';
+        borderColor = '#f59e0b';
+        boxShadow = '0 0 20px rgba(245, 158, 11, 0.5)';
+      } else if (status === 'completed') {
+        backgroundColor = '#dcfce7';
+        borderColor = '#22c55e';
+      }
+      
+      // Style subgraph nodes differently
+      if (node.type === 'subgraph') {
+        backgroundColor = '#ede9fe';
+        borderColor = '#8b5cf6';
+        nodeWidth = 120; // Even smaller for subgraph internal nodes
+      }
+      
+      return {
+        id: node.id,
+        type: 'default',
+        data: { 
+          label: node.type === 'subgraph' ? node.id.split('.')[1] || node.id : node.id 
+        },
+        position,
+        style: {
+          background: backgroundColor,
+          border: '2px solid',
+          borderColor,
+          width: nodeWidth,
+          height: node.type === 'subgraph' ? 40 : 50,
+          boxShadow,
+          transition: 'all 0.3s ease',
+          fontSize: node.type === 'subgraph' ? '11px' : '14px',
+        },
+      };
+    });
+
+    // Convert backend edges to React Flow edges (preserve backend connections)
+    const flowEdges: Edge[] = visibleEdges.map(edge => {
+      const sourceStatus = nodeStatus[edge.source];
+      const targetStatus = nodeStatus[edge.target];
+      
+      // Animate edge if source is running or both are completed
+      const isAnimated = sourceStatus === 'running' || (sourceStatus === 'completed' && targetStatus === 'completed');
+      
+      let strokeColor = '#9ca3af';
+      let strokeWidth = 2;
+      
+      if (sourceStatus === 'running') {
+        strokeColor = '#f59e0b';
+        strokeWidth = 3;
+      } else if (sourceStatus === 'completed' && targetStatus === 'completed') {
+        strokeColor = '#22c55e';
+      }
+      
+      return {
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        markerEnd: { type: MarkerType.ArrowClosed },
+        animated: isAnimated,
+        style: {
+          stroke: strokeColor,
+          strokeWidth,
+          transition: 'all 0.3s ease',
+        },
+      };
+    });
+
+    setNodes(flowNodes);
+    setEdges(flowEdges);
+  }, [topology, topologyLoaded, expandedSubgraphs, dynamicNodes, dynamicEdges, nodeStatus, setNodes, setEdges]);
   
   // Update edge styles and active edge separately to avoid infinite loop
   useEffect(() => {
@@ -476,6 +683,7 @@ function App() {
     setNodeStatus({});
     setStreamedText('');
     setShouldLoadTopology(true); // Trigger graph topology load when flow starts
+    
     try {
       // Start the graph execution and stream text output
       const runResponse = await fetch('http://localhost:8000/demo/run', {
@@ -483,7 +691,9 @@ function App() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ thread_id: newThreadId }),
+        body: JSON.stringify({ 
+          thread_id: newThreadId
+        }),
       });
       
       const runReader = runResponse.body?.getReader();
@@ -504,8 +714,54 @@ function App() {
                 const data = line.slice(6);
                 try {
                   const parsed = JSON.parse(data);
+                  
+                  // Handle real-time events from FlowRecorder
+                  if (parsed.type === 'event' && parsed.data) {
+                    const eventData = parsed.data;
+                    
+                    // Handle node started events
+                    if (eventData.type === 'node_started') {
+                      const nodeId = eventData.data?.node_id;
+                      if (nodeId) {
+                        setNodeStatus(prev => ({
+                          ...prev,
+                          [nodeId]: 'running'
+                        }));
+                      }
+                    }
+                    // Handle subgraph started events
+                    else if (eventData.type === 'subgraph_started') {
+                      const nodeId = eventData.data?.node_id;
+                      if (nodeId) {
+                        setNodeStatus(prev => ({
+                          ...prev,
+                          [nodeId]: 'running'
+                        }));
+                      }
+                    }
+                    // Handle node completed events
+                    else if (eventData.type === 'node_completed') {
+                      const nodeId = eventData.data?.node_id;
+                      if (nodeId) {
+                        setNodeStatus(prev => ({
+                          ...prev,
+                          [nodeId]: 'completed'
+                        }));
+                      }
+                    }
+                    // Handle subgraph completed events
+                    else if (eventData.type === 'subgraph_completed') {
+                      const nodeId = eventData.data?.node_id;
+                      if (nodeId) {
+                        setNodeStatus(prev => ({
+                          ...prev,
+                          [nodeId]: 'completed'
+                        }));
+                      }
+                    }
+                  }
                   // Handle output text chunks
-                  if (parsed.content) {
+                  else if (parsed.content) {
                     setStreamedText(prev => prev + parsed.content + '\n');
                   }
                 } catch (e) {
@@ -516,73 +772,6 @@ function App() {
           }
         };
         runStream();
-      }
-
-      // Start streaming node status updates from /stream endpoint
-      const streamResponse = await fetch(`http://localhost:8000/demo/stream?thread_id=${newThreadId}`);
-      const reader = streamResponse.body?.getReader();
-      const decoder = new TextDecoder();
-
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          const chunk = decoder.decode(value);
-          const lines = chunk.split('\n');
-
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const data = line.slice(6);
-              try {
-                const parsed = JSON.parse(data);
-                
-                // Handle node started events
-                if (parsed.type === 'node_started') {
-                  const nodeId = parsed.data?.node_id;
-                  if (nodeId) {
-                    setNodeStatus(prev => ({
-                      ...prev,
-                      [nodeId]: 'running'
-                    }));
-                  }
-                }
-                // Handle subgraph started events
-                else if (parsed.type === 'subgraph_started') {
-                  const nodeId = parsed.data?.node_id;
-                  if (nodeId) {
-                    setNodeStatus(prev => ({
-                      ...prev,
-                      [nodeId]: 'running'
-                    }));
-                  }
-                }
-                // Handle node completed events
-                else if (parsed.type === 'node_completed') {
-                  const nodeId = parsed.data?.node_id;
-                  if (nodeId) {
-                    setNodeStatus(prev => ({
-                      ...prev,
-                      [nodeId]: 'completed'
-                    }));
-                  }
-                }
-                // Handle subgraph completed events
-                else if (parsed.type === 'subgraph_completed') {
-                  const nodeId = parsed.data?.node_id;
-                  if (nodeId) {
-                    setNodeStatus(prev => ({
-                      ...prev,
-                      [nodeId]: 'completed'
-                    }));
-                  }
-                }
-              } catch (e) {
-                console.error('Failed to parse SSE data:', e);
-              }
-            }
-          }
-        }
       }
     } catch (e) {
       console.error('Failed to run graph:', e);

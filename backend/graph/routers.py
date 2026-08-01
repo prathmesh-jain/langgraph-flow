@@ -1,5 +1,6 @@
 import asyncio
 import json
+import random
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from fastapi import Query
@@ -25,29 +26,24 @@ router = APIRouter(prefix="/demo", tags=["demo"])
 
 @router.post("/run")
 async def run_graph(request: RunRequest):
-    """Execute the complex LangGraph workflow with streaming output.
+    """Execute the LangGraph workflow with streaming output.
     
-    This endpoint runs a multi-node workflow with:
-    - Input processor
-    - Planner
-    - Router with conditional branching
-    - Subgraph (research path) with 4 nodes
-    - Direct executor (alternative path)
-    - Analyzer
-    - Validator
-    - Output formatter (streams text chunks)
-    
+    This endpoint runs the configured workflow with all its nodes and edges.
     Events are automatically recorded by FlowRecorder for visualization.
     
     Args:
         request: Contains thread_id for this execution
     """
+    # Generate random subgraph count (2-10)
+    subgraph_count = random.randint(3, 10)
+    
     inputs = {
         "status": "pending",
         "plan": [],
         "current_step": "",
         "results": [],
-        "execution_path": ""
+        "execution_path": "",
+        "subgraph_count": subgraph_count
     }
     config = {"configurable": {"thread_id": request.thread_id}}
     
@@ -282,39 +278,6 @@ async def get_graph_topology():
     print(f"Final nodes: {nodes}", file=sys.stderr)
     print(f"Final edges: {edges}", file=sys.stderr)
     print(f"Subgraph nodes: {subgraph_nodes}", file=sys.stderr)
-    
-    # Hardcoded fallback for known subgraphs if extraction failed
-    if not subgraph_nodes:
-        print(f"[DEBUG] No subgraphs detected, adding hardcoded fallback", file=sys.stderr)
-        
-        # research_subgraph internal structure
-        research_subgraph_nodes = ["task_1", "task_2", "task_3", "subgraph_aggregator"]
-        research_subgraph_edges = [
-            ("task_1", "task_2"),
-            ("task_2", "task_3"),
-            ("task_3", "subgraph_aggregator")
-        ]
-        
-        for sub_node_id in research_subgraph_nodes:
-            full_id = f"research_subgraph.{sub_node_id}"
-            subgraph_nodes.add(full_id)
-            nodes.append({
-                "id": full_id,
-                "type": "subgraph",
-                "parent": "research_subgraph"
-            })
-        
-        for (source, target) in research_subgraph_edges:
-            full_source = f"research_subgraph.{source}"
-            full_target = f"research_subgraph.{target}"
-            edges.append({
-                "id": f"{full_source}-{full_target}",
-                "source": full_source,
-                "target": full_target,
-                "subgraph": "research_subgraph"
-            })
-        
-        print(f"[DEBUG] Added hardcoded subgraph structure", file=sys.stderr)
     
     return {
         "nodes": nodes,

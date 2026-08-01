@@ -1,8 +1,10 @@
 import time
+import asyncio
 from typing import Literal
 from langgraph.graph import StateGraph, START, END
 from langgraph.config import get_stream_writer
 from .state import GraphState, SubgraphState
+import sys
 
 
 # ============ SUBGRAPH NODES ============
@@ -73,21 +75,36 @@ def input_processor(state: GraphState) -> GraphState:
 
 
 def planner_node(state: GraphState) -> GraphState:
-    """Planner node - creates execution plan."""
+    """Planner node - creates execution plan and determines subgraph count based on state."""
     time.sleep(2)
     plan = ["research", "analysis", "validation", "output"]
+    
+    # Determine subgraph count from state (e.g., alert count from input)
+    # In real scenario, this would come from alert details in state
+    # For demo, use a default if not set
+    subgraph_count = state.get("subgraph_count", 1)
+    
+    # If subgraph_count is 1, generate random for demo purposes
+    # In production, this would be based on actual alert count
+    if subgraph_count == 1:
+        import random
+        subgraph_count = random.randint(2, 5)  # Simulate alert count
+    
+    print(f"[DEBUG planner] Determined subgraph_count: {subgraph_count}", file=sys.stderr)
+    
     return {
         "status": "planned",
         "plan": plan,
         "current_step": "research",
-        "execution_path": "planned"
+        "execution_path": "planned",
+        "subgraph_count": subgraph_count
     }
 
 
-def route_decision(state: GraphState) -> Literal["research_subgraph", "direct_executor"]:
-    """Route to subgraph or direct execution based on plan."""
+def route_decision(state: GraphState) -> Literal["parallel_subgraphs", "direct_executor"]:
+    """Route to parallel subgraphs or direct execution based on plan."""
     if "research" in state.get("plan", []):
-        return "research_subgraph"
+        return "parallel_subgraphs"
     return "direct_executor"
 
 
@@ -99,6 +116,64 @@ def direct_executor(state: GraphState) -> GraphState:
         "results": ["Direct execution result"],
         "current_step": "validation",
         "execution_path": "direct"
+    }
+
+
+async def parallel_subgraphs(state: GraphState) -> GraphState:
+    """Execute multiple subgraph instances in parallel with event streaming."""
+    subgraph_count = state.get("subgraph_count", 1)
+    subgraph_template = create_subgraph()
+    
+    # Collect custom events to return in output
+    custom_events = []
+    
+    # Emit subgraph start events for each instance
+    for i in range(subgraph_count):
+        subgraph_id = f"parallel_subgraphs_{i+1}"
+        custom_events.append({"type": "subgraph_started", "data": {"node_id": subgraph_id}})
+        custom_events.append({"type": "node_started", "data": {"node_id": subgraph_id}})
+    
+    # Create and execute subgraph instances in parallel
+    async def execute_subgraph_instance(index: int):
+        """Execute a single subgraph instance with event streaming."""
+        subgraph_id = f"parallel_subgraphs_{index+1}"
+        subgraph_input = {
+            "status": "started",
+            "task_results": [],
+            "current_task": "task_1"
+        }
+        
+        # Manually emit events for subgraph internal nodes
+        tasks_nodes = ["task_1", "task_2", "task_3", "subgraph_aggregator"]
+        for task_node in tasks_nodes:
+            full_node_id = f"{subgraph_id}.{task_node}"
+            custom_events.append({"type": "node_started", "data": {"node_id": full_node_id, "parent": subgraph_id}})
+            await asyncio.sleep(1)  # Simulate task execution
+            custom_events.append({"type": "node_completed", "data": {"node_id": full_node_id, "parent": subgraph_id}})
+        
+        return {"task_results": [f"{subgraph_id} completed"]}
+    
+    # Execute all subgraph instances in parallel
+    tasks = [execute_subgraph_instance(i) for i in range(subgraph_count)]
+    results = await asyncio.gather(*tasks)
+    
+    # Emit subgraph completion events
+    for i in range(subgraph_count):
+        subgraph_id = f"parallel_subgraphs_{i+1}"
+        custom_events.append({"type": "subgraph_completed", "data": {"node_id": subgraph_id}})
+        custom_events.append({"type": "node_completed", "data": {"node_id": subgraph_id}})
+    
+    # Aggregate results from all subgraphs
+    all_results = []
+    for i, result in enumerate(results):
+        all_results.extend(result.get("task_results", []))
+    
+    return {
+        "status": "parallel_subgraphs_completed",
+        "results": all_results,
+        "current_step": "validation",
+        "execution_path": "parallel",
+        "__custom__": custom_events  # Embed custom events in output for FlowRecorder to capture
     }
 
 
@@ -151,16 +226,13 @@ def output_formatter(state: GraphState) -> GraphState:
 
 
 def create_workflow() -> StateGraph:
-    """Create and compile the complex LangGraph workflow with subgraph."""
+    """Create and compile the complex LangGraph workflow with parallel subgraphs."""
     workflow = StateGraph(GraphState)
-    
-    # Create subgraph
-    research_subgraph = create_subgraph()
     
     # Add main graph nodes
     workflow.add_node("input_processor", input_processor)
     workflow.add_node("planner", planner_node)
-    workflow.add_node("research_subgraph", research_subgraph)
+    workflow.add_node("parallel_subgraphs", parallel_subgraphs)
     workflow.add_node("direct_executor", direct_executor)
     workflow.add_node("analyzer", analyzer_node)
     workflow.add_node("validator", validator_node)
@@ -175,13 +247,13 @@ def create_workflow() -> StateGraph:
         "planner",
         route_decision,
         {
-            "research_subgraph": "research_subgraph",
+            "parallel_subgraphs": "parallel_subgraphs",
             "direct_executor": "direct_executor"
         }
     )
     
     # Both paths converge at analyzer
-    workflow.add_edge("research_subgraph", "analyzer")
+    workflow.add_edge("parallel_subgraphs", "analyzer")
     workflow.add_edge("direct_executor", "analyzer")
     
     # Continue through validation and output
