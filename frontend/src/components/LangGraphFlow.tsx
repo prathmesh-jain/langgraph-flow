@@ -10,9 +10,8 @@ import {
   type NodeTypes,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { useGraphStore } from '../store';
 import CustomNode from './CustomNode';
-import type { GraphTopology, VisualizationEvent } from '../types';
+import type { GraphTopology, VisualizationEvent, NodeStatus, EdgeStatus } from '../types';
 
 const nodeTypes: NodeTypes = {
   custom: CustomNode,
@@ -32,7 +31,84 @@ function LangGraphFlowInner({ graphEndpoint, streamEndpoint, threadId, runEndpoi
   const [localThreadId, setLocalThreadId] = useState<string | undefined>(threadId);
   const eventSourceRef = useRef<EventSource | null>(null);
 
-  const { nodeStates, edgeStates, activeNodes, isRunning, handleEvent, reset, setRunning } = useGraphStore();
+  // Replace Zustand store with local state
+  const [nodeStates, setNodeStates] = useState<Map<string, NodeStatus>>(new Map());
+  const [edgeStates, setEdgeStates] = useState<Map<string, EdgeStatus>>(new Map());
+  const [activeNodes, setActiveNodes] = useState<Set<string>>(new Set());
+  const [isRunning, setIsRunning] = useState(false);
+
+  const updateNodeStatus = useCallback((nodeId: string, status: NodeStatus) => {
+    setNodeStates(prev => new Map(prev).set(nodeId, status));
+  }, []);
+
+  const setActiveNode = useCallback((nodeId: string) => {
+    setActiveNodes(prev => new Set(prev).add(nodeId));
+  }, []);
+
+  const removeActiveNode = useCallback((nodeId: string) => {
+    setActiveNodes(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(nodeId);
+      return newSet;
+    });
+  }, []);
+
+  const reset = useCallback(() => {
+    setNodeStates(new Map());
+    setEdgeStates(new Map());
+    setActiveNodes(new Set());
+    setIsRunning(false);
+  }, []);
+
+  const handleEvent = useCallback((event: VisualizationEvent) => {
+    const typeLower = String(event.type).toLowerCase();
+
+    switch (typeLower) {
+      case 'graphstarted':
+      case 'graph_started':
+        setIsRunning(true);
+        break;
+
+      case 'graphcompleted':
+      case 'graph_completed':
+        setIsRunning(false);
+        setActiveNodes(new Set());
+        break;
+
+      case 'nodestarted':
+      case 'node_started':
+      case 'subgraphstarted':
+      case 'subgraph_started': {
+        const nodeId = event.node_id || event.data?.node_id;
+        if (nodeId) {
+          updateNodeStatus(nodeId, 'running');
+          setActiveNode(nodeId);
+        }
+        break;
+      }
+
+      case 'nodecompleted':
+      case 'node_completed':
+      case 'subgraphcompleted':
+      case 'subgraph_completed': {
+        const nodeId = event.node_id || event.data?.node_id;
+        if (nodeId) {
+          updateNodeStatus(nodeId, 'completed');
+          removeActiveNode(nodeId);
+        }
+        break;
+      }
+
+      case 'error': {
+        const nodeId = event.node_id || event.data?.node_id;
+        if (nodeId) {
+          updateNodeStatus(nodeId, 'failed');
+          removeActiveNode(nodeId);
+        }
+        break;
+      }
+    }
+  }, [updateNodeStatus, setActiveNode, removeActiveNode]);
 
   useEffect(() => {
     fetch(graphEndpoint)
@@ -71,7 +147,7 @@ function LangGraphFlowInner({ graphEndpoint, streamEndpoint, threadId, runEndpoi
     if (!effectiveThreadId || !streamEndpoint) return;
 
     reset();
-    setRunning(true);
+    setIsRunning(true);
 
     const separator = streamEndpoint.includes('?') ? '&' : '?';
     const url = `${streamEndpoint}${separator}thread_id=${encodeURIComponent(effectiveThreadId)}`;
@@ -84,7 +160,7 @@ function LangGraphFlowInner({ graphEndpoint, streamEndpoint, threadId, runEndpoi
         handleEvent(data);
 
         if (data.type === 'graph_completed' || data.type === 'GraphCompleted') {
-          setRunning(false);
+          setIsRunning(false);
           eventSource.close();
         }
       } catch (e) {
@@ -95,13 +171,13 @@ function LangGraphFlowInner({ graphEndpoint, streamEndpoint, threadId, runEndpoi
     eventSource.onerror = (error) => {
       console.error('SSE error:', error);
       eventSource.close();
-      setRunning(false);
+      setIsRunning(false);
     };
 
     return () => {
       eventSource.close();
     };
-  }, [threadId, localThreadId, streamEndpoint, handleEvent, reset, setRunning]);
+  }, [threadId, localThreadId, streamEndpoint, handleEvent, reset]);
 
   useEffect(() => {
     setNodes((prevNodes) =>
