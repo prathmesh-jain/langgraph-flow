@@ -84,7 +84,6 @@ async def stream_graph(thread_id: str = Query(..., description="Thread ID to fet
     """
     import sys
     import asyncio
-    print(f"[DEBUG] /stream called with thread_id: {thread_id}", file=sys.stderr)
     
     sent_event_ids = set()
     
@@ -93,19 +92,16 @@ async def stream_graph(thread_id: str = Query(..., description="Thread ID to fet
         while True:
             events = flow.get_events(run_id=thread_id)
             
-            print(f"[DEBUG] Polling events for {thread_id}: {len(events)} total", file=sys.stderr)
             
             # Send new events that haven't been sent yet
             for event in events:
                 event_id = f"{event['type']}_{event.get('timestamp', '')}"
                 if event_id not in sent_event_ids:
-                    print(f"[DEBUG] Streaming new event: {event}", file=sys.stderr)
                     yield f"data: {json.dumps(event)}\n\n"
                     sent_event_ids.add(event_id)
             
             # Check if graph is completed
             if events and any(e["type"] == "graph_completed" for e in events):
-                print(f"[DEBUG] Graph completed, ending stream", file=sys.stderr)
                 break
             
             # Wait before polling again
@@ -182,7 +178,6 @@ async def get_graph_topology():
         edges = extract_edges(graph_structure)
         
         import sys
-        print(f"[DEBUG] Checking {len(nodes)} nodes for subgraphs", file=sys.stderr)
         
         for node in nodes:
             node_id = node["id"]
@@ -193,7 +188,6 @@ async def get_graph_topology():
                     node_obj = compiled_graph.nodes[node_id]
                     if hasattr(node_obj, 'subgraphs') and node_obj.subgraphs:
                         subgraph_structure = node_obj.subgraphs[0]
-                        print(f"[DEBUG] Found compiled subgraph in node: {node_id}", file=sys.stderr)
                         is_subgraph_node = True
                         
                         for sub_node_id in subgraph_structure.nodes:
@@ -262,12 +256,6 @@ async def get_graph_topology():
             import sys
             print(f"Error parsing mermaid: {e}", file=sys.stderr)
     
-    import sys
-    print(f"Final nodes: {len(nodes)} - {[n['id'] for n in nodes]}", file=sys.stderr)
-    print(f"Final edges: {len(edges)} - {[e['id'] for e in edges]}", file=sys.stderr)
-    print(f"Subgraph nodes: {subgraph_nodes}", file=sys.stderr)
-    print(f"Subgraph templates: {list(subgraph_templates.keys())}", file=sys.stderr)
-    print(f"Parallel execution nodes: {parallel_execution_nodes}", file=sys.stderr)
     
     return {
         "nodes": nodes,

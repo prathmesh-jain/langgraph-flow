@@ -108,7 +108,6 @@ def planner_node(state: GraphState) -> GraphState:
         import random
         subgraph_count = random.randint(2, 5)  # Simulate alert count
     
-    print(f"[DEBUG planner] Determined subgraph_count: {subgraph_count}", file=sys.stderr)
     
     return {
         "status": "planned",

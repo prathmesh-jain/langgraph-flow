@@ -29,21 +29,6 @@ function computeLayout(
   const mainNodes = nodes.filter(n => !n.parent);
   const subgraphNodes = nodes.filter(n => n.parent);
 
-  console.log("========== NEW LAYOUT ==========");
-  console.log("Expanded:", [...expandedSubgraphs]);
-
-  console.log(
-    "Subgraph node count:",
-    subgraphNodes.length
-  );
-
-  console.log(
-    "Nodes:",
-    nodes.map(n => ({
-      id: n.id,
-      parent: n.parent
-    }))
-  );
 
 
   // Build adjacency list for main graph only
@@ -134,7 +119,6 @@ function computeLayout(
   // Find which layer contains expanded subgraphs and calculate required spacing
   const expandedSubgraphLayers = new Set<number>();
   const subgraphNodeCounts: Record<number, number> = {};
-  console.log("Layers:", layers);
   layers.forEach((layer, layerIndex) => {
     layer.forEach(nodeId => {
       if (expandedSubgraphs.has(nodeId)) {
@@ -204,7 +188,6 @@ function computeLayout(
   // First, ensure parent nodes have positions (for dynamically created parents)
   sortedParentIds.forEach(parentId => {
     if (!positions[parentId]) {
-      console.log('[computeLayout] Parent node not in positions:', parentId);
 
       // For parallel_subgraphs_X nodes, position them in the layer after planner
       // This is based on the workflow structure: planner -> parallel_subgraphs -> analyzer
@@ -224,14 +207,12 @@ function computeLayout(
             x: startX + (parentXOffsets[parentId] || 0),
             y: y
           };
-          console.log('[computeLayout] Positioned parallel_subgraphs parent at layer:', layerIndex, parentId, positions[parentId]);
         } else {
           // Fallback if planner not found
           positions[parentId] = {
             x: canvasWidth / 2 + (parentXOffsets[parentId] || 0),
             y: 150
           };
-          console.log('[computeLayout] Positioned parallel_subgraphs parent at fallback:', parentId, positions[parentId]);
         }
       } else {
         // For other dynamic parent nodes, try edge-based positioning
@@ -254,7 +235,6 @@ function computeLayout(
               x: startX + (parentXOffsets[parentId] || 0),
               y: y
             };
-            console.log('[computeLayout] Positioned parent at layer:', layerIndex, parentId, positions[parentId]);
           } else {
             // Fallback: position at the end of the graph
             const lastLayerY = layers.length * layerHeight + 50;
@@ -262,7 +242,6 @@ function computeLayout(
               x: canvasWidth / 2 + (parentXOffsets[parentId] || 0),
               y: lastLayerY
             };
-            console.log('[computeLayout] Positioned parent at fallback:', parentId, positions[parentId]);
           }
         } else {
           // Fallback: position at the end of the graph
@@ -271,7 +250,6 @@ function computeLayout(
             x: canvasWidth / 2 + (parentXOffsets[parentId] || 0),
             y: lastLayerY
           };
-          console.log('[computeLayout] Positioned parent at fallback:', parentId, positions[parentId]);
         }
       }
     }
@@ -281,35 +259,22 @@ function computeLayout(
   sortedParentIds.forEach(parentId => {
     const parentPos = positions[parentId];
     if (!parentPos) {
-      console.log('[computeLayout] Parent has no position, skipping subgraph nodes:', parentId);
       return;
     }
 
     const parentSubgraphNodes = subgraphNodes.filter(n => n.parent === parentId);
-    console.log('[computeLayout] Positioning subgraph nodes for parent:', parentId, 'count:', parentSubgraphNodes.length);
-    console.log(
-      "Parent layout position:",
-      parentPos
-    );
     parentSubgraphNodes.forEach((subNode, index) => {
       if (expandedSubgraphs.has(parentId)) {
         // Position directly below parent with vertical spacing
         const offsetY = (index + 1) * nodeSpacing; // 60px spacing between subgraph nodes
-        console.log('[computeLayout] Expanded index:', index, 'offsetY:', offsetY);
         positions[subNode.id] = {
           x: parentPos.x, // Same X position as parent
           y: parentPos.y + offsetY
         };
-        console.log('[computeLayout] Positioned subgraph node:', subNode.id, positions[subNode.id]);
       }
     });
   });
 
-  console.log('[computeLayout] Final positions:', positions);
-  console.log(
-    "RETURNING",
-    JSON.stringify(positions, null, 2)
-  );
   return positions;
 }
 
@@ -346,9 +311,6 @@ function GraphVisualization({
       try {
         const response = await fetch('http://localhost:8000/demo/graph');
         const topology: GraphTopology = await response.json();
-
-        console.log('Received topology:', topology);
-        console.log('Subgraph nodes:', topology.subgraph_nodes);
 
         // Store topology for dynamic node creation
         setTopology(topology);
@@ -524,7 +486,6 @@ function GraphVisualization({
       const isSubgraphParent = hasChildNodes || isParallelSubgraphInstance;
 
       if (isSubgraphParent && status === 'running' && !newExpanded.has(nodeId)) {
-        console.log(`Auto-expanding subgraph: ${nodeId}`);
         newExpanded.add(nodeId);
 
         // Dynamically create internal nodes for subgraph instances
@@ -582,7 +543,6 @@ function GraphVisualization({
 
       // Auto-collapse when subgraph completes
       if (isSubgraphParent && status === 'completed' && newExpanded.has(nodeId)) {
-        console.log(`Auto-collapsing subgraph: ${nodeId}`);
         newExpanded.delete(nodeId);
 
         // Remove dynamic subgraph internal nodes when collapsing
@@ -598,8 +558,6 @@ function GraphVisualization({
           const index = newDynamicEdges.findIndex(e => e.id === edge.id);
           if (index !== -1) newDynamicEdges.splice(index, 1);
         });
-
-        console.log(`Removed ${nodesToRemove.length} subgraph nodes and ${edgesToRemove.length} edges for ${nodeId}`);
       }
     });
 
@@ -617,24 +575,14 @@ function GraphVisualization({
   useEffect(() => {
     if (!topology || !topologyLoaded) return;
 
-    console.log('[GraphUpdate] Updating graph with topology:', topology);
-    console.log('[GraphUpdate] Dynamic nodes:', dynamicNodes);
-    console.log('[GraphUpdate] Dynamic edges:', dynamicEdges);
-    console.log('[GraphUpdate] Expanded subgraphs:', Array.from(expandedSubgraphs));
 
     // Combine static topology with dynamic nodes
     const allNodes = [...topology.nodes, ...dynamicNodes];
     const allEdges = [...topology.edges, ...dynamicEdges];
 
-    console.log('[GraphUpdate] All nodes:', allNodes.length);
-    console.log('[GraphUpdate] All edges:', allEdges.length);
-
     // Use automatic layout algorithm based on combined topology
     const layoutPositions = computeLayout(allNodes, allEdges, expandedSubgraphs);
-    console.log(
-      "AFTER COMPUTELAYOUT",
-      layoutPositions["parallel_subgraphs.task_1"]
-    );
+
 
     // Filter nodes based on expanded subgraphs
     const visibleNodes = allNodes.filter(node => {
@@ -654,13 +602,9 @@ function GraphVisualization({
       return true;
     });
 
-    console.log('[GraphUpdate] Visible nodes:', visibleNodes.length);
-    console.log('[GraphUpdate] Visible edges:', visibleEdges.length);
-
     // Convert backend nodes to React Flow nodes
     const flowNodes: Node[] = visibleNodes.map(node => {
       const position = layoutPositions[node.id] || { x: 0, y: 0 };
-      console.log(node.id, position, node.type, 222222);
       const status = nodeStatus[node.id];
 
       let backgroundColor = '#f3f4f6';
@@ -749,9 +693,6 @@ function GraphVisualization({
       };
     });
 
-    console.log('[GraphUpdate] Setting flow nodes:', flowNodes.length);
-    console.log('[GraphUpdate] Setting flow edges:', flowEdges.length);
-
     setNodes(flowNodes);
     setEdges(flowEdges);
   }, [topology, topologyLoaded, expandedSubgraphs, dynamicNodes, dynamicEdges, nodeStatus, setNodes, setEdges]);
@@ -809,9 +750,6 @@ function GraphVisualization({
   }, [nodeStatus, topologyLoaded, setEdges]);
 
   if (!showGraph) return null;
-
-  console.log('[GraphVisualization] Rendering with nodes:', nodes.length, 'edges:', edges.length);
-  console.log('[GraphVisualization] Topology loaded:', topologyLoaded);
 
   return (
     <div className="h-[600px] bg-white rounded-lg shadow-md border">
