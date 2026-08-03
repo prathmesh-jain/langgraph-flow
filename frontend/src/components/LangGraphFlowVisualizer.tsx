@@ -390,6 +390,7 @@ export default function LangGraphFlowVisualizer({
               boxShadow,
               transition: 'all 0.3s ease',
               fontSize: node.type === 'subgraph' ? '11px' : '14px',
+              borderRadius: '10px'
             },
           };
         });
@@ -553,6 +554,7 @@ export default function LangGraphFlowVisualizer({
             height: 50,
             boxShadow,
             transition: 'all 0.3s ease',
+            
           },
         };
       })
@@ -734,6 +736,7 @@ export default function LangGraphFlowVisualizer({
           alignItems: 'center',
           justifyContent: 'center',
           textAlign: 'center',
+          borderRadius: '10px'
         },
       };
     });
