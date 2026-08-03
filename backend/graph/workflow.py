@@ -137,52 +137,6 @@ def direct_executor(state: GraphState) -> GraphState:
     }
 
 
-def create_workflow() -> StateGraph:
-    """Create and compile the complex LangGraph workflow with parallel subgraphs."""
-    workflow = StateGraph(GraphState)
-    
-    # Add main graph nodes
-    workflow.add_node("input_processor", input_processor)
-    workflow.add_node("planner", planner_node)
-    workflow.add_node("direct_executor", direct_executor)
-    workflow.add_node("analyzer", analyzer_node)
-    workflow.add_node("validator", validator_node)
-    workflow.add_node("output_formatter", output_formatter)
-    
-    # Add compiled subgraphs as nodes for parallel execution
-    # Note: These are actual compiled StateGraph objects that will be executed as subgraphs
-    research_subgraph = create_subgraph()
-    analysis_subgraph = create_analysis_subgraph()
-    
-    workflow.add_node("research_subgraph", research_subgraph)
-    workflow.add_node("analysis_subgraph", analysis_subgraph)
-    
-    # Add edges
-    workflow.add_edge(START, "input_processor")
-    workflow.add_edge("input_processor", "planner")
-    
-    # Conditional routing from planner to parallel subgraphs
-    workflow.add_conditional_edges(
-        "planner",
-        route_decision,
-        {
-            "research_subgraph": "research_subgraph",
-            "analysis_subgraph": "analysis_subgraph",
-            "direct_executor": "direct_executor"
-        }
-    )
-    
-    # Both subgraph paths converge at analyzer
-    workflow.add_edge("research_subgraph", "analyzer")
-    workflow.add_edge("analysis_subgraph", "analyzer")
-    workflow.add_edge("direct_executor", "analyzer")
-    
-    # Continue through validation and output
-    workflow.add_edge("analyzer", "validator")
-    workflow.add_edge("validator", "output_formatter")
-    workflow.add_edge("output_formatter", END)
-    
-    return workflow.compile()
 
 
 def analyzer_node(state: GraphState) -> GraphState:
@@ -240,7 +194,7 @@ def create_workflow() -> StateGraph:
     # Add main graph nodes
     workflow.add_node("input_processor", input_processor)
     workflow.add_node("planner", planner_node)
-    workflow.add_node("direct_executor", direct_executor)
+    # workflow.add_node("direct_executor", direct_executor)
     workflow.add_node("analyzer", analyzer_node)
     workflow.add_node("validator", validator_node)
     workflow.add_node("output_formatter", output_formatter)
@@ -264,14 +218,14 @@ def create_workflow() -> StateGraph:
         {
             "research_subgraph": "research_subgraph",
             "analysis_subgraph": "analysis_subgraph",
-            "direct_executor": "direct_executor"
+            # "direct_executor": "direct_executor"
         }
     )
     
     # Both subgraph paths converge at analyzer
     workflow.add_edge("research_subgraph", "analyzer")
     workflow.add_edge("analysis_subgraph", "analyzer")
-    workflow.add_edge("direct_executor", "analyzer")
+    # workflow.add_edge("direct_executor", "analyzer")
     
     # Continue through validation and output
     workflow.add_edge("analyzer", "validator")
