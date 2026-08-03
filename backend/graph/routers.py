@@ -14,7 +14,7 @@ graph = create_workflow()
 
 # Wrap with FlowRecorder for event recording
 # Set persist=True to keep events for /stream endpoint to retrieve
-flow = FlowRecorder(graph, persist=True)
+flow = FlowRecorder(graph, persist=False)
 
 
 class RunRequest(BaseModel):

@@ -1,6 +1,7 @@
 import sqlite3
 import json
 import uuid
+import asyncio
 from typing import AsyncGenerator, Optional, Any
 from contextlib import contextmanager
 from datetime import datetime
@@ -353,9 +354,12 @@ class FlowRecorder:
             print(f"[DEBUG FlowRecorder] Graph completed, events stored", file=sys.stderr)
             print(f"[DEBUG FlowRecorder] Total events for run_id {run_id}: {len(self._storage.get_events(run_id))}", file=sys.stderr)
             
-            # Auto-cleanup if not persisting
+            # Auto-cleanup if not persisting - delay to allow stream endpoint to finish
             if not self._storage.persist:
-                print(f"[DEBUG FlowRecorder] Auto-cleanup enabled, deleting events", file=sys.stderr)
+                print(f"[DEBUG FlowRecorder] Auto-cleanup enabled, delaying deletion to allow stream to finish", file=sys.stderr)
+                # Wait 5 seconds to allow stream endpoint to finish sending all events
+                await asyncio.sleep(5)
+                print(f"[DEBUG FlowRecorder] Auto-cleanup deleting events after delay", file=sys.stderr)
                 self._storage.cleanup_run(run_id)
                 self._current_run_id = None
             else:
@@ -413,8 +417,10 @@ class FlowRecorder:
             self._storage.complete_run(run_id)
             self._storage.store_event(run_id, "graph_completed", {})
             
-            # Auto-cleanup if not persisting
+            # Auto-cleanup if not persisting - delay to allow stream endpoint to finish
             if not self._storage.persist:
+                # Wait 5 seconds to allow stream endpoint to finish sending all events
+                await asyncio.sleep(5)
                 self._storage.cleanup_run(run_id)
                 self._current_run_id = None
         except Exception as e:

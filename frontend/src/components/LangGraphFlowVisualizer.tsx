@@ -545,7 +545,10 @@ export default function LangGraphFlowVisualizer({
         }
 
         return {
-          ...node,
+          id: node.id,
+          type: node.type,
+          data: node.data,
+          position: node.position,
           style: {
             background: backgroundColor,
             border: '2px solid',
@@ -554,7 +557,6 @@ export default function LangGraphFlowVisualizer({
             height: 50,
             boxShadow,
             transition: 'all 0.3s ease',
-            
           },
         };
       })
@@ -808,7 +810,10 @@ export default function LangGraphFlowVisualizer({
         }
 
         return {
-          ...edge,
+          id: edge.id,
+          source: edge.source,
+          target: edge.target,
+          markerEnd: edge.markerEnd,
           animated,
           style: {
             stroke: strokeColor,
